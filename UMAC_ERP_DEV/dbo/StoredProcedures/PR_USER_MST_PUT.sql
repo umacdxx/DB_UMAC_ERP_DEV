@@ -1,0 +1,152 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.01.05
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 사용자 정보 저장
+-- 실행문 : EXEC PR_USER_MST_PUT 'ksm2094','강세미','ROLE01','01','01','01','01033329335','admin'
+*/
+CREATE PROCEDURE [dbo].[PR_USER_MST_PUT]
+	@P_USER_ID NVARCHAR(20),	-- 사용자ID
+	@P_USER_NM NVARCHAR(20), 	-- 사용자명
+	@P_ROLE_ID NVARCHAR(6), 	-- 권한그룹
+	@P_DEPT_CODE NVARCHAR(25),	-- 조직코드
+	@P_POSITION NVARCHAR(3),	-- 직급
+	@P_JOB_FLAG NVARCHAR(2), 	-- 재직구분
+	@P_MOBIL_NO NVARCHAR(11), 	-- 휴대폰번호
+	@P_EMP_ID NVARCHAR(20)		-- 아이디
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	DECLARE @ID_YN NVARCHAR(20) = 'N'	-- ID존재여부
+	DECLARE @PASSWD_NO BINARY(20)			-- 패스워드
+	DECLARE @BEFORE_ROLE_ID NVARCHAR(6)		-- 기존 권한
+	DECLARE @RETURN_CODE INT = 0			-- 리턴코드
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) = ''		-- 리턴메시지
+	DECLARE @P_MOBIL_NO_ENCRYPT VARBINARY(256)
+
+	BEGIN TRY 
+	EXEC UMAC_CERT_OPEN_KEY; -- OPEN
+
+		SET @P_MOBIL_NO_ENCRYPT = DBO.GET_ENCRYPT(@P_MOBIL_NO);
+	
+		 -- ID 있는지 확인
+		IF EXISTS (
+			SELECT 1 
+			  FROM TBL_USER_MST
+			 WHERE USER_ID = @P_USER_ID
+		)
+		BEGIN
+			SET @ID_YN = 'Y'
+		END
+
+		IF @ID_YN = 'Y' 
+			BEGIN
+				SELECT @BEFORE_ROLE_ID = ROLE_ID FROM TBL_USER_MST WHERE USER_ID = @P_USER_ID
+				
+				UPDATE TBL_USER_MST
+					SET USER_NM = @P_USER_NM,
+						 ROLE_ID = @P_ROLE_ID,
+						 DEPT_CODE = @P_DEPT_CODE,
+						 POSITION = @P_POSITION,
+						 JOB_FLAG = @P_JOB_FLAG,						 
+						 MOBIL_NO = @P_MOBIL_NO_ENCRYPT,
+						 UDATE = GETDATE(),
+						 UEMP_ID = @P_EMP_ID
+				 WHERE USER_ID = @P_USER_ID
+
+				 IF @BEFORE_ROLE_ID <> @P_ROLE_ID
+				BEGIN
+					-- 권한 변경 시 사용자권한 다시 세팅
+					DELETE TBL_USER_ROLE_MST 
+						WHERE USER_ID = @P_USER_ID
+
+					INSERT INTO TBL_USER_ROLE_MST (USER_ID, 
+													MENU_CODE, 
+													IDATE, 
+													IEMP_ID)
+					SELECT @P_USER_ID, 
+							MENU_CODE, 
+							GETDATE(), 
+							@P_EMP_ID 
+						FROM TBL_ROLE_MENU
+					WHERE ROLE_ID = @P_ROLE_ID
+
+					-- 마이메뉴 삭제
+					DELETE TBL_MY_MENU WHERE USER_ID = @P_USER_ID
+				END
+
+				-- 알림톡에 해당 유저 있는경우 전화번호 업데이트
+				 IF EXISTS (SELECT 1 FROM TBL_SUREM_TO WHERE USER_ID = @P_USER_ID)
+				 BEGIN
+					UPDATE TBL_SUREM_TO 
+					   SET MOBIL_NO = @P_MOBIL_NO_ENCRYPT
+					WHERE USER_ID = @P_USER_ID
+				 END
+				
+			END
+		ELSE
+			BEGIN
+				SET @PASSWD_NO = CONVERT(BINARY(20), HASHBYTES('SHA1',@P_USER_ID))
+
+				INSERT INTO TBL_USER_MST(
+							USER_ID,
+							PASSWD_NO,
+							USER_NM,
+							ROLE_ID,
+							DEPT_CODE,
+							POSITION,
+							JOB_FLAG,
+							MOBIL_NO,
+							IDATE,
+							IEMP_ID
+							) VALUES (
+							@P_USER_ID,
+							@PASSWD_NO,
+							@P_USER_NM,
+							@P_ROLE_ID,
+							@P_DEPT_CODE,
+							@P_POSITION,
+							@P_JOB_FLAG,
+							--@P_MOBIL_NO,
+							@P_MOBIL_NO_ENCRYPT,
+							GETDATE(),
+							@P_EMP_ID
+							)
+
+				-- 기본권한 세팅
+				INSERT INTO TBL_USER_ROLE_MST (USER_ID, 
+														 MENU_CODE, 
+														 IDATE, 
+														 IEMP_ID)
+					  SELECT @P_USER_ID, 
+								MENU_CODE, 
+								GETDATE(), 
+								@P_EMP_ID 
+						 FROM TBL_ROLE_MENU
+						WHERE ROLE_ID = @P_ROLE_ID
+						
+			END
+
+		SET @RETURN_CODE = 0 -- 저장완료
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('0')
+	EXEC UMAC_CERT_CLOSE_KEY -- CLOSE
+	END TRY
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+
+		SET @RETURN_CODE = -1 -- 저장실패
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1')
+	END CATCH
+	
+	
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+END
+
+GO
+

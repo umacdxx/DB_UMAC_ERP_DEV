@@ -1,0 +1,63 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.07.11
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 알림톡 수신자 등록
+-- 실행문 : 
+-- EXEC PR_ALIMTALK_TO_PUT 'PRD_02', 'admin', '01012121212' 
+
+*/
+CREATE PROCEDURE [dbo].[PR_ALIMTALK_TO_PUT]
+	@P_templateCode		NVARCHAR(30),		-- 템플릿코드
+	@P_USER_ID			NVARCHAR(20),		-- 아이디
+	@P_MOBIL_NO			NVARCHAR(20)		-- 전화번호
+AS 
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	
+    DECLARE @RETURN_CODE	INT = 0									-- 리턴코드
+	DECLARE @RETURN_MESSAGE NVARCHAR(30) = '저장되었습니다.'		-- 리턴메시지
+	DECLARE @ENC_MOBIL_NO	VARBINARY(256)							-- 암호화 전화번호
+
+	BEGIN TRY 
+		EXEC UMAC_CERT_OPEN_KEY; -- OPEN
+		
+		SET @ENC_MOBIL_NO = DBO.GET_ENCRYPT(@P_MOBIL_NO);
+
+		IF EXISTS(SELECT 1 FROM TBL_SUREM_TO 
+					WHERE templateCode = @P_templateCode AND USER_ID = @P_USER_ID)
+		BEGIN
+			UPDATE TBL_SUREM_TO 
+			   SET MOBIL_NO = @ENC_MOBIL_NO,
+	   			   UDATE = GETDATE()
+		  	 WHERE templateCode = @P_templateCode
+				  AND USER_ID = @P_USER_ID
+		END
+		ELSE
+		BEGIN
+			INSERT INTO TBL_SUREM_TO(templateCode, USER_ID, MOBIL_NO, IDATE)
+			VALUES(@P_templateCode, @P_USER_ID, @ENC_MOBIL_NO, GETDATE())
+		END
+
+		EXEC UMAC_CERT_CLOSE_KEY; -- OPEN
+	END TRY
+	
+	BEGIN CATCH		
+	--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+
+		SET @RETURN_CODE = -1 -- 저장실패
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1')
+	END CATCH
+
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+	
+END
+
+GO
+

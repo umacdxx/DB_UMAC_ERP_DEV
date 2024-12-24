@@ -1,0 +1,874 @@
+/*
+-- 생성자 :	윤현빈
+-- 등록일 :	2024.05.21
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명 : 배치성, 일 수불 테이블 인서트 처리
+-- 설 명 : 파라미터 일자 입력 시 과거일자 수동으로 재 집계 처리 예정 
+-- ## 20240521 중량으로 체크하는 상품이 생길수도 있음, 테이블 변경사항 생길 수 있음
+-- 실행문 : EXEC PR_BATCH_DAILY_IV_ITEM_COLL '','','Y'
+*/
+CREATE PROCEDURE [dbo].[PR_BATCH_DAILY_IV_ITEM_COLL]
+
+	/* 전체 수행 시 '' 값으로 처리, 파라미터 값 일을 때 해당하는 것만 일괄처리 */
+	@P_DATE			NVARCHAR(8),	-- YYYYMMDD 형태
+	@P_ITM_CODE		NVARCHAR(6),	-- ITM_CODE
+	@P_MENUAL_YN	NVARCHAR(1)		-- 수동여부
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	DECLARE @RETURN_CODE INT = 0				-- 리턴코드
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) = ''	-- 리턴메시지
+
+	BEGIN TRAN
+	BEGIN TRY 
+		DECLARE @V_CUR_DATE NVARCHAR(8);
+		DECLARE @V_YESTERDAY_DATE NVARCHAR(8);
+		DECLARE @V_MENUAL_YN NVARCHAR(1);
+		DECLARE @V_MAX_SEQ INT;
+		DECLARE @V_START_TIME DATETIME;
+
+
+-- ************************************************************
+-- 배치 로그 테이블 삽입
+-- ************************************************************
+		SET @RETURN_CODE = 1;
+		DECLARE @InsertedSEQ TABLE (SEQ INT);
+		
+		SET @V_START_TIME = GETDATE();
+
+		IF @P_MENUAL_YN = 'N'
+		BEGIN
+			SET @V_MENUAL_YN = 'N';
+		END
+		ELSE 
+		BEGIN
+			SET @V_MENUAL_YN = 'Y';
+		END
+
+		INSERT INTO TBL_BATCH_LOG
+		OUTPUT INSERTED.SEQ INTO @InsertedSEQ
+		SELECT CONVERT(VARCHAR(8), GETDATE(), 112)
+			    , 'PR_BATCH_DAILY_IV_ITEM_COLL'
+				, 'R'
+				, @V_START_TIME
+				, NULL
+				, NULL
+				, @V_MENUAL_YN
+				;
+		
+		SELECT @V_MAX_SEQ = SEQ FROM @InsertedSEQ;
+
+-- ************************************************************
+-- 일자 셋팅
+-- ************************************************************
+		SET @RETURN_CODE = 2;
+		IF @P_DATE = ''
+		BEGIN
+			SET @V_CUR_DATE = CONVERT(NVARCHAR(8), DATEADD(DAY, -1, GETDATE()), 112);
+			SET @V_YESTERDAY_DATE = CONVERT(NVARCHAR(8), DATEADD(DAY, -2, GETDATE()), 112);
+		END
+		ELSE 
+		BEGIN
+			SET @V_CUR_DATE = @P_DATE;
+			SET @V_YESTERDAY_DATE = CONVERT(NVARCHAR(8), DATEADD(DAY, -1, CAST(@P_DATE AS DATE)), 112);
+		END
+	
+
+		--ERR 테스트
+		--select 1/0;
+		--ERR 테스트//
+	
+-- ************************************************************
+-- 임시테이블 생성
+-- ************************************************************
+		SET @RETURN_CODE = 3;
+
+        CREATE TABLE #TEMP_DATA (
+            INV_DT NVARCHAR(8)
+          , ITM_CODE NVARCHAR(6)
+          , BASE_INV_QTY numeric(15,2)
+          , BASE_INV_WAMT numeric(17,4)
+          , BASE_INV_WPRC numeric(17,4)
+          , BASE_INV_WVAT numeric(17,4)
+          , PUR_QTY numeric(15,2)
+          , PUR_WAMT numeric(13,2)
+          , PUR_WPRC numeric(13,2)
+          , PUR_WVAT numeric(13,2)
+          , SALE_QTY numeric(15,2)
+          , SALE_WAMT numeric(17,4)
+          , SALE_WPRC numeric(17,4)
+          , SALE_WVAT numeric(17,4)
+          , PROD_QTY numeric(15,2)
+          , PROD_WAMT numeric(13,2)
+          , PROD_WPRC numeric(13,2)
+          , PROD_WVAT numeric(13,2)
+          , RTN_QTY numeric(15,2)
+          , RTN_WAMT numeric(13,2)
+          , RTN_WPRC numeric(13,2)
+          , RTN_WVAT numeric(13,2)
+          , INV_ADJ_QTY numeric(15,2)
+          , INV_ADJ_WAMT numeric(13,2)
+          , INV_ADJ_WPRC numeric(13,2)
+          , INV_ADJ_WVAT numeric(13,2)
+          , INV_END_QTY numeric(15,2)
+          , INV_END_WAMT numeric(17,4)
+          , INV_END_WPRC numeric(17,4)
+          , INV_END_WVAT numeric(17,4)
+        );
+
+        CREATE TABLE #TEMP_LOT_DATA (
+            INV_DT NVARCHAR(8)
+          , ITM_CODE NVARCHAR(6)
+		  , LOT_NO NVARCHAR(30)
+          , BASE_INV_QTY numeric(15,2)
+          , PUR_QTY numeric(15,2)
+          , SALE_QTY numeric(15,2)
+          , PROD_QTY numeric(15,2)
+          , RTN_QTY numeric(15,2)
+          , INV_ADJ_QTY numeric(15,2)
+          , INV_END_QTY numeric(15,2)
+        );
+
+-- ************************************************************
+-- 데이터 가공 및 임시테이블 저장
+-- 기말 재고 : 전일 재고 + 입고 + 매출(-) + 생산 + 매입반품(-) + 재고조정(+,-)
+-- ************************************************************
+		SET @RETURN_CODE = 4;
+	-- ************************************************************
+	-- 0. 부자재 계산 (루뎅, 띠라벨, 캔-패드)
+	-- W_CAP_DATA ~ W_MAT_USAGE
+	-- ************************************************************
+		WITH W_CAP_DATA AS (
+			SELECT A.PROD_DT
+				 , A.SCAN_CODE
+				 , A.COMP_CODE
+				 , A.INPUT_QTY
+				 , SUM(A.INPUT_QTY) OVER(PARTITION BY A.COMP_CODE ORDER BY A.PROD_DT) AS CUM_LUTEN_INPUT_QTY
+				 , SUM(A.INPUT_QTY) OVER(PARTITION BY A.SCAN_CODE, A.COMP_CODE ORDER BY A.PROD_DT) AS CUM_LABEL_INPUT_QTY
+				FROM PD_MAT_USAGE AS A
+			   WHERE YYYYMM = LEFT(@V_CUR_DATE, 6)
+				 AND PROD_DT <= @V_CUR_DATE
+				 AND MAT_GB = '1'
+		), W_EMPTY_BOX_DATA AS (
+			SELECT A.PROD_DT
+				 , A.SCAN_CODE
+				 , A.COMP_CODE
+				 , A.INPUT_QTY
+				 , SUM(A.INPUT_QTY) OVER(PARTITION BY A.COMP_CODE ORDER BY A.PROD_DT) AS EMPTY_BOX_INPUT_QTY
+				FROM PD_MAT_USAGE AS A
+			   WHERE PROD_DT = @V_CUR_DATE
+				 AND MAT_GB = '5'
+		), W_CAN_DATA AS (
+			SELECT A.PROD_DT
+				 , A.SCAN_CODE
+				 , C.CD_ID AS COMP_CODE
+				 , A.PROD_APP_QTY AS PROD_QTY
+				 , CAST(ROUND(A.PROD_APP_QTY / C.MGMT_ENTRY_3, 0) AS INT) AS INPUT_QTY
+				FROM CD_LOT_MST AS A
+				INNER JOIN CD_PRODUCT_CMN AS B ON A.SCAN_CODE = B.SCAN_CODE
+				INNER JOIN TBL_COMM_CD_MST AS C ON B.MID_CODE = C.MGMT_ENTRY_1 AND B.UNIT_CAPACITY = C.MGMT_ENTRY_2 AND C.CD_CL = 'MAPPING_CAN_PAD' AND DEL_YN = 'N'
+			   WHERE PROD_DT = @V_CUR_DATE
+			     AND A.CFM_FLAG = 'Y'
+		), W_LUTEN as (
+			SELECT A.PROD_DT
+				 , B.MGMT_ENTRY_1 AS COMP_CODE
+				 , CAST(ROUND(A.CUM_LUTEN_INPUT_QTY / CAST(B.MGMT_ENTRY_DESCRIPTION_1 AS DECIMAL), 0) - COALESCE(LAG(ROUND(A.CUM_LUTEN_INPUT_QTY / CAST(B.MGMT_ENTRY_DESCRIPTION_1 AS DECIMAL), 0)) 
+				   OVER (PARTITION BY A.COMP_CODE ORDER BY A.PROD_DT), 0) AS INT) AS INPUT_QTY
+				FROM W_CAP_DATA AS A
+				INNER JOIN TBL_COMM_CD_MST AS B ON A.COMP_CODE = B.CD_ID AND B.CD_CL = 'MAPPING_CAP_LUTEN' AND DEL_YN = 'N'
+		), W_LABEL AS (
+			SELECT A.PROD_DT
+				 , B.MGMT_ENTRY_1 AS COMP_CODE
+				 , CAST(ROUND(A.CUM_LABEL_INPUT_QTY / CAST(B.MGMT_ENTRY_DESCRIPTION_1 AS DECIMAL), 0) - COALESCE(LAG(ROUND(A.CUM_LABEL_INPUT_QTY / CAST(B.MGMT_ENTRY_DESCRIPTION_1 AS DECIMAL), 0)) 
+				   OVER (PARTITION BY A.SCAN_CODE, A.COMP_CODE ORDER BY A.PROD_DT), 0) AS INT) AS INPUT_QTY
+				FROM W_CAP_DATA AS A
+				INNER JOIN TBL_COMM_CD_MST AS B ON A.SCAN_CODE = B.CD_ID AND B.CD_CL = 'MAPPING_CAP_LABEL' AND DEL_YN = 'N'
+		), W_PAD AS (
+			SELECT A.PROD_DT
+				 , A.COMP_CODE
+				 , INPUT_QTY
+				FROM W_CAN_DATA AS A
+		), W_MAT_USAGE AS (
+			SELECT * FROM W_LUTEN AS A WHERE A.PROD_DT = @V_CUR_DATE
+			UNION ALL
+			SELECT * FROM W_LABEL AS A WHERE A.PROD_DT = @V_CUR_DATE
+			UNION ALL
+			SELECT * FROM W_PAD AS A WHERE A.PROD_DT = @V_CUR_DATE
+		), 
+		
+		W_DATA AS (
+	-- ************************************************************
+	-- 1. 전일 재고 : 전 일자 기말재고 
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE
+			     , A.BASE_INV_QTY, A.BASE_INV_WAMT, A.BASE_INV_WPRC, A.BASE_INV_WVAT
+				 , 0 AS PUR_QTY, 0 AS PUR_WAMT, 0 AS PUR_WPRC, 0 AS PUR_WVAT, 0 AS SALE_QTY, 0 AS SALE_WAMT, 0 AS SALE_WPRC, 0 AS SALE_WVAT, 0 AS PROD_QTY, 0 AS PROD_WAMT, 0 AS PROD_WPRC, 0 AS PROD_WVAT, 0 AS RTN_QTY, 0 AS RTN_WAMT, 0 AS RTN_WPRC, 0 AS RTN_WVAT, 0 AS INV_ADJ_QTY, 0 AS INV_ADJ_WAMT, 0 AS INV_ADJ_WPRC, 0 AS INV_ADJ_WVAT
+				FROM (
+					SELECT A.ITM_CODE						-- 관리 코드
+						 , A.INV_END_QTY AS BASE_INV_QTY	-- 전 일자 기말 재고 수량			
+						 , A.INV_END_WAMT AS BASE_INV_WAMT	-- 전 일자 기말 재고 원가 합계
+						 , A.INV_END_WPRC AS BASE_INV_WPRC	-- 전 일자 기말 재고 원가 공급가
+						 , A.INV_END_WVAT AS BASE_INV_WVAT	-- 전 일자 기말 재고 원가 부가세
+						FROM IV_DT_ITEM_COLL AS A
+					   WHERE A.INV_DT = @V_YESTERDAY_DATE
+						 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND A.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+				) AS A
+			UNION ALL
+	-- ************************************************************
+	-- 2. 입고(매입)
+	-- 매입확정 시 수불처리
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE, 0 AS BASE_INV_QTY, 0 AS BASE_INV_WAMT, 0 AS BASE_INV_WPRC, 0 AS BASE_INV_WVAT
+				 , A.PUR_QTY, A.PUR_WAMT, A.PUR_WPRC, A.PUR_WVAT
+				 , 0 AS SALE_QTY, 0 AS SALE_WAMT, 0 AS SALE_WPRC, 0 AS SALE_WVAT, 0 AS PROD_QTY, 0 AS PROD_WAMT, 0 AS PROD_WPRC, 0 AS PROD_WVAT, 0 AS RTN_QTY, 0 AS RTN_WAMT, 0 AS RTN_WPRC, 0 AS RTN_WVAT, 0 AS INV_ADJ_QTY, 0 AS INV_ADJ_WAMT, 0 AS INV_ADJ_WPRC, 0 AS INV_ADJ_WVAT
+				FROM (
+					SELECT C.ITM_CODE											-- 관리 코드
+						 , ISNULL(SUM(B.PUR_QTY), 0) AS PUR_QTY					-- 입고(매입)수량
+						 , ISNULL(SUM(B.PUR_WAMT) * (-1), 0) AS PUR_WAMT				-- 매입 합계금액
+						 , ISNULL(SUM(B.PUR_QTY * B.PUR_WPRC) * (-1), 0) AS PUR_WPRC	-- 매입 단가(공급가)
+						 , ISNULL(SUM(B.PUR_QTY * B.PUR_WVAT) * (-1), 0) AS PUR_WVAT	-- 매입 부가세
+						FROM PO_PURCHASE_HDR AS A 
+						INNER JOIN PO_PURCHASE_DTL AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+					   WHERE A.DELIVERY_IN_DT = @V_CUR_DATE
+						 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND C.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+						 AND A.PUR_STAT IN ('35', '40') -- 매입확정
+					   GROUP BY C.ITM_CODE
+				) AS A
+			UNION ALL
+	-- ************************************************************
+	-- 3. 매출(-)
+	-- 매출확정 시 수불처리
+	-- 박스 상품은 단품 상품으로 치환
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE, 0 AS BASE_INV_QTY, 0 AS BASE_INV_WAMT, 0 AS BASE_INV_WPRC, 0 AS BASE_INV_WVAT, 0 AS PUR_QTY, 0 AS PUR_WAMT, 0 AS PUR_WPRC, 0 AS PUR_WVAT
+				 , A.SALE_QTY, A.SALE_WAMT, A.SALE_WPRC, A.SALE_WVAT
+				 , 0 AS PROD_QTY, 0 AS PROD_WAMT, 0 AS PROD_WPRC, 0 AS PROD_WVAT, 0 AS RTN_QTY, 0 AS RTN_WAMT, 0 AS RTN_WPRC, 0 AS RTN_WVAT, 0 AS INV_ADJ_QTY, 0 AS INV_ADJ_WAMT, 0 AS INV_ADJ_WPRC, 0 AS INV_ADJ_WVAT
+				FROM (
+					SELECT CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(D.ITM_CODE, C.ITM_CODE) ELSE C.ITM_CODE END AS ITM_CODE	-- 관리 코드
+						 , CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(SUM(B.PICKING_QTY * ISNULL(D.IPSU_QTY, 1)), 0) * (-1) ELSE ISNULL(SUM(B.PICKING_QTY), 0) * (-1) END AS SALE_QTY							-- 매출수량 [-]
+						 , CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(SUM(B.PICKING_SAMT * ISNULL(D.IPSU_QTY, 1)), 0) ELSE ISNULL(SUM(B.PICKING_SAMT), 0) END AS SALE_WAMT							-- 판매 원가 합계
+						 , CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(SUM(B.PICKING_QTY * ISNULL(D.IPSU_QTY, 1) * B.PICKING_SPRC), 0) ELSE ISNULL(SUM(B.PICKING_QTY * B.PICKING_SPRC), 0) END AS SALE_WPRC	-- 매출 원가 금액 [-]
+						 , CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(SUM(B.PICKING_QTY * ISNULL(D.IPSU_QTY, 1) * B.PICKING_SVAT), 0) ELSE ISNULL(SUM(B.PICKING_QTY * B.PICKING_SVAT), 0) END AS SALE_WVAT	-- 판매 원가 부갓
+						FROM PO_ORDER_HDR AS A
+						--INNER JOIN PO_ORDER_DTL AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN VIEW_ORDER_DTL_SAMPLE_SUM AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+						LEFT OUTER JOIN CD_BOX_MST AS D ON C.ITM_CODE = D.BOX_CODE
+					   WHERE A.DELIVERY_DEC_DT = @V_CUR_DATE
+						 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND C.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+						 AND A.ORD_STAT IN ('35', '40') -- 매출확정
+						 AND A.ORD_GB = '1'
+					   GROUP BY (CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(D.ITM_CODE, C.ITM_CODE) ELSE C.ITM_CODE END), C.ITM_FORM, D.BOX_CODE
+				) AS A
+			UNION ALL
+	-- ************************************************************
+	-- 4. 생산
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE, 0 AS BASE_INV_QTY, 0 AS BASE_INV_WAMT, 0 AS BASE_INV_WPRC, 0 AS BASE_INV_WVAT, 0 AS PUR_QTY, 0 AS PUR_WAMT, 0 AS PUR_WPRC, 0 AS PUR_WVAT, 0 AS SALE_QTY, 0 AS SALE_WAMT, 0 AS SALE_WPRC, 0 AS SALE_WVAT
+				 , A.PROD_QTY, A.PROD_WAMT, A.PROD_WPRC, A.PROD_WVAT
+				 , 0 AS RTN_QTY, 0 AS RTN_WAMT, 0 AS RTN_WPRC, 0 AS RTN_WVAT, 0 AS INV_ADJ_QTY, 0 AS INV_ADJ_WAMT, 0 AS INV_ADJ_WPRC, 0 AS INV_ADJ_WVAT
+				FROM (
+					SELECT A.ITM_CODE
+					     , SUM(PROD_QTY) AS PROD_QTY
+						 , 0 AS PROD_WAMT	-- 생산 원가 합계
+						 , 0 AS PROD_WPRC	-- 생산 원가 공급가
+						 , 0 AS PROD_WVAT	-- 생산 원가 부가세
+						FROM (
+							-- 제품 생산
+							SELECT B.ITM_CODE					-- 관리 코드
+								 , A.PROD_APP_QTY AS PROD_QTY	-- 생산 수량
+								FROM CD_LOT_MST AS A
+								INNER JOIN CD_PRODUCT_CMN AS B ON A.SCAN_CODE = B.SCAN_CODE
+							   WHERE A.PROD_DT = @V_CUR_DATE
+								 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND B.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+								 AND A.CFM_FLAG = 'Y'
+							UNION ALL
+							-- 제품 생산(BOM)
+							SELECT B.ITM_CODE					-- 관리 코드
+								 , SUM(A.COMP_APP_QTY) AS PROD_QTY 	-- 생산 수량
+								FROM PD_BOM_SET_HIST AS A
+								INNER JOIN CD_PRODUCT_CMN AS B ON A.BOM_SET_COMP_CD = B.SCAN_CODE
+							   WHERE A.PROD_DT = @V_CUR_DATE
+								 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND B.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+								 AND A.CFM_FLAG = 'Y'
+							   GROUP BY B.ITM_CODE
+							-- 제품 생산(SET)
+							UNION ALL
+							--SELECT B.ITM_CODE					-- 관리 코드
+							--	 , SUM(A.PROD_QTY) AS PROD_QTY 	-- 생산 수량
+							--	FROM PD_SET_RESULT_PROD AS A
+							--	INNER JOIN CD_PRODUCT_CMN AS B ON A.SCAN_CODE = B.SCAN_CODE
+							--   WHERE A.PROD_DT = @V_CUR_DATE
+							--	 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND B.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+							--   GROUP BY B.ITM_CODE
+							--UNION ALL
+							---- 제품 생산(SET BOM)
+							--SELECT B.ITM_CODE					-- 관리 코드
+							--	 , SUM(A.COMP_QTY) AS PROD_QTY 	-- 생산 수량
+							--	FROM PD_SET_RESULT_COMP AS A
+							--	INNER JOIN CD_PRODUCT_CMN AS B ON A.SET_COMP_CD = B.SCAN_CODE
+							--   WHERE A.PROD_DT = @V_CUR_DATE
+							--	 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND B.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+							--	 AND A.RESTORE_YN = 'N'
+							--   GROUP BY B.ITM_CODE
+							--UNION ALL
+							-- 부자재 사용(루뎅, 띠라벨, 패드)
+							SELECT B.ITM_CODE
+							     , SUM(A.INPUT_QTY) * (-1) AS PROD_QTY
+								FROM W_MAT_USAGE AS A
+								INNER JOIN CD_PRODUCT_CMN AS B ON A.COMP_CODE = B.SCAN_CODE
+							   GROUP BY B.ITM_CODE
+							UNION ALL
+							-- 부자재 사용(공박스)
+							SELECT B.ITM_CODE
+							     , SUM(A.INPUT_QTY) * (-1) AS PROD_QTY
+								FROM W_EMPTY_BOX_DATA AS A
+								INNER JOIN CD_PRODUCT_CMN AS B ON A.COMP_CODE = B.SCAN_CODE
+							   GROUP BY B.ITM_CODE
+						) AS A
+						GROUP BY A.ITM_CODE
+				) AS A
+
+			UNION ALL
+	-- ************************************************************
+	-- 5. 매출반품(+)
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE, 0 AS BASE_INV_QTY, 0 AS BASE_INV_WAMT, 0 AS BASE_INV_WPRC, 0 AS BASE_INV_WVAT, 0 AS PUR_QTY, 0 AS PUR_WAMT, 0 AS PUR_WPRC, 0 AS PUR_WVAT, 0 AS SALE_QTY, 0 AS SALE_WAMT, 0 AS SALE_WPRC, 0 AS SALE_WVAT, 0 AS PROD_QTY, 0 AS PROD_WAMT, 0 AS PROD_WPRC, 0 AS PROD_WVAT
+				 , A.RTN_QTY AS RTN_QTY
+				 , 0 AS RTN_WAMT, 0 AS RTN_WPRC, 0 AS RTN_WVAT, 0 AS INV_ADJ_QTY, 0 AS INV_ADJ_WAMT, 0 AS INV_ADJ_WPRC, 0 AS INV_ADJ_WVAT
+				FROM (
+					SELECT CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(D.ITM_CODE, C.ITM_CODE) ELSE C.ITM_CODE END AS ITM_CODE	-- 관리 코드
+						 , CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(SUM(B.PICKING_QTY * ISNULL(D.IPSU_QTY, 1)), 0) ELSE ISNULL(SUM(B.PICKING_QTY), 0) END AS RTN_QTY
+						FROM PO_ORDER_HDR AS A
+						INNER JOIN VIEW_ORDER_DTL_SAMPLE_SUM AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+						LEFT OUTER JOIN CD_BOX_MST AS D ON C.ITM_CODE = D.BOX_CODE
+					   WHERE A.DELIVERY_DEC_DT = @V_CUR_DATE
+						 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND C.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+						 AND A.ORD_STAT IN ('35', '40') -- 매출확정
+						 AND A.ORD_GB = '2'
+					   GROUP BY (CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(D.ITM_CODE, C.ITM_CODE) ELSE C.ITM_CODE END), C.ITM_FORM, D.BOX_CODE
+				) AS A
+			UNION ALL
+	-- ************************************************************
+	-- 6. 재고조정(+,-)
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE, 0 AS BASE_INV_QTY, 0 AS BASE_INV_WAMT, 0 AS BASE_INV_WPRC, 0 AS BASE_INV_WVAT, 0 AS PUR_QTY, 0 AS PUR_WAMT, 0 AS PUR_WPRC, 0 AS PUR_WVAT, 0 AS SALE_QTY, 0 AS SALE_WAMT, 0 AS SALE_WPRC, 0 AS SALE_WVAT, 0 AS PROD_QTY, 0 AS PROD_WAMT, 0 AS PROD_WPRC, 0 AS PROD_WVAT, 0 AS RTN_QTY, 0 AS RTN_WAMT, 0 AS RTN_WPRC, 0 AS RTN_WVAT
+				 , A.INV_ADJ_QTY, A.INV_ADJ_WAMT, A.INV_ADJ_WPRC, A.INV_ADJ_WVAT
+				FROM (
+					SELECT CASE WHEN B.ITM_FORM = '2' THEN ISNULL(C.ITM_CODE, A.ITM_CODE) ELSE A.ITM_CODE END AS ITM_CODE
+						 , CASE WHEN B.ITM_FORM = '2' THEN ISNULL(SUM(A.APP_QTY * ISNULL(C.IPSU_QTY, 1)), 0) ELSE ISNULL(SUM(A.APP_QTY), 0) END AS INV_ADJ_QTY
+						 , 0 AS INV_ADJ_WAMT
+						 , 0 AS INV_ADJ_WPRC
+						 , 0 AS INV_ADJ_WVAT
+						FROM IV_STOCK_ADJUST AS A
+						INNER JOIN CD_PRODUCT_CMN AS B ON A.SCAN_CODE = B.SCAN_CODE
+						LEFT OUTER JOIN CD_BOX_MST AS C ON A.ITM_CODE = C.BOX_CODE
+					   WHERE A.INV_DT = @V_CUR_DATE
+						 AND A.CFM_FLAG = 'Y'
+						 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND B.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+						 AND A.SEQ=(CASE WHEN A.INV_GB = '99' THEN (SELECT MAX(SEQ) FROM IV_STOCK_ADJUST AS T WHERE T.INV_DT = A.INV_DT AND T.ITM_CODE = A.ITM_CODE AND T.LOT_NO = A.LOT_NO AND T.INV_GB = '99') ELSE A.SEQ END )
+					   GROUP BY (CASE WHEN B.ITM_FORM = '2' THEN ISNULL(C.ITM_CODE, A.ITM_CODE) ELSE A.ITM_CODE END), B.ITM_FORM
+				) AS A
+		)
+		INSERT INTO #TEMP_DATA
+		SELECT @V_CUR_DATE AS INV_DT
+		     , ITM_CODE
+		     , SUM(BASE_INV_QTY) AS BASE_INV_QTY	-- 전일 재고 수량
+		     , SUM(BASE_INV_WAMT) AS BASE_INV_WAMT	-- 전일 재고 합계 금액
+		     , SUM(BASE_INV_WPRC) AS BASE_INV_WPRC	-- 전일 재고 공급가
+		     , SUM(BASE_INV_WVAT) AS BASE_INV_WVAT	-- 전일 재고 부가세
+
+		     , SUM(PUR_QTY) AS PUR_QTY				-- 매입 수량
+		     , SUM(PUR_WAMT) AS PUR_WAMT			-- 매입 합계 금액
+		     , SUM(PUR_WPRC) AS PUR_WPRC			-- 매입 공급가
+		     , SUM(PUR_WVAT) AS PUR_WVAT			-- 매입 부가세
+
+		     , SUM(SALE_QTY) AS SALE_QTY			-- 매출[-] 수량
+		     , SUM(SALE_WAMT) AS SALE_WAMT			-- 매출[-] 합계 금액
+		     , SUM(SALE_WPRC) AS SALE_WPRC			-- 매출[-] 공급가
+		     , SUM(SALE_WVAT) AS SALE_WVAT			-- 매출[-] 부가세
+
+		     , SUM(PROD_QTY) AS PROD_QTY			-- 생산 수량
+		     , SUM(PROD_WAMT) AS PROD_WAMT			-- 생산 합계 금액
+		     , SUM(PROD_WPRC) AS PROD_WPRC			-- 생산 공급가
+		     , SUM(PROD_WVAT) AS PROD_WVAT			-- 생산 부가세
+
+		     , SUM(RTN_QTY) AS RTN_QTY				-- 매입반품[-] 수량
+		     , SUM(RTN_WAMT) AS RTN_WAMT			-- 매입반품[-] 합계 금액
+		     , SUM(RTN_WPRC) AS RTN_WPRC			-- 매입반품[-] 공급가
+		     , SUM(RTN_WVAT) AS RTN_WVAT			-- 매입반품[-] 부가세
+
+		     , SUM(INV_ADJ_QTY) AS INV_ADJ_QTY		-- 재고조정[+,-] 수량
+		     , SUM(INV_ADJ_WAMT) AS INV_ADJ_WAMT	-- 재고조정[+,-] 합계 금액
+		     , SUM(INV_ADJ_WPRC) AS INV_ADJ_WPRC	-- 재고조정[+,-] 공급가
+		     , SUM(INV_ADJ_WVAT) AS INV_ADJ_WVAT	-- 재고조정[+,-] 부가세
+
+		     , SUM(BASE_INV_QTY) + SUM(PUR_QTY) + SUM(SALE_QTY) + SUM(PROD_QTY) + SUM(RTN_QTY) + SUM(INV_ADJ_QTY) AS INV_END_QTY		-- 기말 재고 수량
+		     , SUM(BASE_INV_WAMT) + SUM(PUR_WAMT) + SUM(SALE_WAMT) + SUM(PROD_WAMT) + SUM(RTN_WAMT) + SUM(INV_ADJ_WAMT) AS INV_END_WAMT	-- 기말 재고 합계 금액
+		     , SUM(BASE_INV_WPRC) + SUM(PUR_WPRC) + SUM(SALE_WPRC) + SUM(PROD_WPRC) + SUM(RTN_WPRC) + SUM(INV_ADJ_WPRC) AS INV_END_WPRC	-- 기말 재고 공급가
+		     , SUM(BASE_INV_WVAT) + SUM(PUR_WVAT) + SUM(SALE_WVAT) + SUM(PROD_WVAT) + SUM(RTN_WVAT) + SUM(INV_ADJ_WVAT) AS INV_END_WVAT	-- 기말 재고 부가세
+			FROM W_DATA
+		   GROUP BY ITM_CODE
+		   ;
+
+-- ************************************************************
+-- 로트별 데이터 가공 및 임시테이블 저장
+-- 기말 재고 : 전일 재고 + 입고 + 매출(-) + 생산 + 매입반품(-) + 재고조정(+,-)
+-- ************************************************************
+		SET @RETURN_CODE = 5;
+
+		WITH W_CAP_DATA AS (
+			SELECT A.PROD_DT
+				 , A.SCAN_CODE
+				 , A.COMP_CODE
+				 , A.INPUT_QTY
+				 --, SUM(A.INPUT_QTY) OVER(PARTITION BY A.COMP_CODE ORDER BY A.PROD_DT) AS CUM_INPUT_QTY
+				 , SUM(A.INPUT_QTY) OVER(PARTITION BY A.COMP_CODE ORDER BY A.PROD_DT) AS CUM_LUTEN_INPUT_QTY
+				 , SUM(A.INPUT_QTY) OVER(PARTITION BY A.SCAN_CODE, A.COMP_CODE ORDER BY A.PROD_DT) AS CUM_LABEL_INPUT_QTY
+				FROM PD_MAT_USAGE AS A
+			   WHERE YYYYMM = LEFT(@V_CUR_DATE, 6)
+				 AND PROD_DT <= @V_CUR_DATE
+				 AND MAT_GB = '1'
+		), W_EMPTY_BOX_DATA AS (
+			SELECT A.PROD_DT
+				 , A.SCAN_CODE
+				 , A.COMP_CODE
+				 , A.INPUT_QTY
+				 , SUM(A.INPUT_QTY) OVER(PARTITION BY A.COMP_CODE ORDER BY A.PROD_DT) AS EMPTY_BOX_INPUT_QTY
+				FROM PD_MAT_USAGE AS A
+			   WHERE PROD_DT = @V_CUR_DATE
+				 AND MAT_GB = '5'
+		), W_CAN_DATA AS (
+			SELECT A.PROD_DT
+				 , A.SCAN_CODE
+				 , C.CD_ID AS COMP_CODE
+				 , A.PROD_APP_QTY AS PROD_QTY
+				 , CAST(ROUND(A.PROD_APP_QTY / C.MGMT_ENTRY_3, 0) AS INT) AS INPUT_QTY
+				FROM CD_LOT_MST AS A
+				INNER JOIN CD_PRODUCT_CMN AS B ON A.SCAN_CODE = B.SCAN_CODE
+				INNER JOIN TBL_COMM_CD_MST AS C ON B.MID_CODE = C.MGMT_ENTRY_1 AND B.UNIT_CAPACITY = C.MGMT_ENTRY_2 AND C.CD_CL = 'MAPPING_CAN_PAD' AND DEL_YN = 'N'
+			   WHERE PROD_DT = @V_CUR_DATE
+			     AND A.CFM_FLAG = 'Y'
+		), W_LUTEN as (
+			SELECT A.PROD_DT
+				 , B.MGMT_ENTRY_1 AS COMP_CODE
+				 , CAST(ROUND(A.CUM_LUTEN_INPUT_QTY / CAST(B.MGMT_ENTRY_DESCRIPTION_1 AS DECIMAL), 0) - COALESCE(LAG(ROUND(A.CUM_LUTEN_INPUT_QTY / CAST(B.MGMT_ENTRY_DESCRIPTION_1 AS DECIMAL), 0)) 
+				   OVER (PARTITION BY A.COMP_CODE ORDER BY A.PROD_DT), 0) AS INT) AS INPUT_QTY
+				FROM W_CAP_DATA AS A
+				INNER JOIN TBL_COMM_CD_MST AS B ON A.COMP_CODE = B.CD_ID AND B.CD_CL = 'MAPPING_CAP_LUTEN' AND DEL_YN = 'N'
+		), W_LABEL AS (
+			SELECT A.PROD_DT
+				 , B.MGMT_ENTRY_1 AS COMP_CODE
+				 , CAST(ROUND(A.CUM_LABEL_INPUT_QTY / CAST(B.MGMT_ENTRY_DESCRIPTION_1 AS DECIMAL), 0) - COALESCE(LAG(ROUND(A.CUM_LABEL_INPUT_QTY / CAST(B.MGMT_ENTRY_DESCRIPTION_1 AS DECIMAL), 0)) 
+				   OVER (PARTITION BY A.SCAN_CODE, A.COMP_CODE ORDER BY A.PROD_DT), 0) AS INT) AS INPUT_QTY
+				FROM W_CAP_DATA AS A
+				INNER JOIN TBL_COMM_CD_MST AS B ON A.SCAN_CODE = B.CD_ID AND B.CD_CL = 'MAPPING_CAP_LABEL' AND DEL_YN = 'N'
+		), W_PAD AS (
+			SELECT A.PROD_DT
+				 , A.COMP_CODE
+				 , INPUT_QTY
+				FROM W_CAN_DATA AS A
+		), W_MAT_USAGE AS (
+			SELECT * FROM W_LUTEN AS A WHERE A.PROD_DT = @V_CUR_DATE
+			UNION ALL
+			SELECT * FROM W_LABEL AS A WHERE A.PROD_DT = @V_CUR_DATE
+			UNION ALL
+			SELECT * FROM W_PAD AS A WHERE A.PROD_DT = @V_CUR_DATE
+		), 
+		
+		W_LOT_DATA AS (
+	-- ************************************************************
+	-- 1. 전일 재고 : 전 일자 기말재고 
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE, A.LOT_NO
+			     , A.BASE_INV_QTY
+				 , 0 AS PUR_QTY, 0 AS SALE_QTY, 0 AS PROD_QTY, 0 AS RTN_QTY, 0 AS INV_ADJ_QTY
+				FROM (
+					SELECT A.ITM_CODE						-- 관리 코드
+					     , A.LOT_NO
+						 , A.INV_END_QTY AS BASE_INV_QTY	-- 전 일자 기말 재고 수량			
+						FROM IV_DT_ITEM_LOT_COLL AS A
+					   WHERE A.INV_DT = @V_YESTERDAY_DATE
+						 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND A.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+				) AS A
+			UNION ALL
+	-- ************************************************************
+	-- 2. 입고(매입)
+	-- 매입확정 시 수불처리
+	-- #매입은 lot가 없어서 처리 안함
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE, A.LOT_NO, 0 AS BASE_INV_QTY
+				 , A.PUR_QTY
+				 , 0 AS SALE_QTY, 0 AS PROD_QTY, 0 AS RTN_QTY, 0 AS INV_ADJ_QTY
+				FROM (
+					SELECT C.ITM_CODE											-- 관리 코드
+					     , '' AS LOT_NO
+						 , ISNULL(SUM(B.PUR_QTY), 0) AS PUR_QTY					-- 입고(매입)수량
+						FROM PO_PURCHASE_HDR AS A 
+						INNER JOIN PO_PURCHASE_DTL AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+					   WHERE A.DELIVERY_IN_DT = @V_CUR_DATE
+						 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND C.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+						 AND A.PUR_STAT IN ('35', '40') -- 매입확정
+					   GROUP BY C.ITM_CODE
+				) AS A
+			UNION ALL
+	-- ************************************************************
+	-- 3. 매출(-)
+	-- 매출확정 시 수불처리
+	-- 박스 상품은 단품 상품으로 치환
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE, A.LOT_NO, 0 AS BASE_INV_QTY, 0 AS PUR_QTY
+				 , A.SALE_QTY
+				 , 0 AS PROD_QTY, 0 AS RTN_QTY, 0 AS INV_ADJ_QTY
+				FROM (
+					SELECT CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(D.ITM_CODE, C.ITM_CODE) ELSE C.ITM_CODE END AS ITM_CODE	-- 관리 코드
+					     --, CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(E.LOT_NO, '') ELSE ISNULL(E.LOT_NO, '') END AS LOT_NO		-- LOT_NO
+						 , ISNULL(E.LOT_NO, '') AS LOT_NO
+						 , CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(SUM(ISNULL(E.PICKING_QTY, B.PICKING_QTY) * ISNULL(D.IPSU_QTY, 1)), 0) * (-1) ELSE ISNULL(SUM(ISNULL(E.PICKING_QTY, B.PICKING_QTY)), 0) * (-1) END AS SALE_QTY							-- 매출수량 [-]
+						FROM PO_ORDER_HDR AS A
+						INNER JOIN (
+							SELECT A.ORD_NO
+								 , A.SCAN_CODE
+								 , SUM(A.PICKING_QTY) AS PICKING_QTY
+							FROM (
+								SELECT A.ORD_NO
+									 , A.SCAN_CODE
+									 , A.PICKING_QTY
+								  FROM PO_ORDER_DTL AS A
+								UNION ALL
+								SELECT B.ORD_NO
+									 , B.SCAN_CODE
+									 , B.PICKING_QTY
+								  FROM PO_ORDER_SAMPLE AS B
+							) AS A
+							GROUP BY A.ORD_NO, A.SCAN_CODE
+						) AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+						LEFT OUTER JOIN PO_ORDER_LOT AS E ON B.ORD_NO = E.ORD_NO AND B.SCAN_CODE = E.SCAN_CODE
+						LEFT OUTER JOIN CD_BOX_MST AS D ON C.ITM_CODE = D.BOX_CODE
+						--LEFT OUTER JOIN CD_PRODUCT_CMN AS F ON D.ITM_CODE = F.ITM_CODE
+						--LEFT OUTER JOIN PO_ORDER_LOT AS G ON B.ORD_NO = G.ORD_NO AND F.SCAN_CODE = G.SCAN_CODE
+					   WHERE A.DELIVERY_DEC_DT = @V_CUR_DATE
+						 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND C.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+						 AND A.ORD_STAT IN ('35', '40') -- 매출확정
+						 AND A.ORD_GB = '1'
+					   GROUP BY (CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(D.ITM_CODE, C.ITM_CODE) ELSE C.ITM_CODE END), C.ITM_FORM, D.BOX_CODE, ISNULL(E.LOT_NO, '')--, ISNULL(E.LOT_NO, '')
+				) AS A
+			UNION ALL
+	-- ************************************************************
+	-- 4. 생산
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE, A.LOT_NO, 0 AS BASE_INV_QTY, 0 AS PUR_QTY, 0 AS SALE_QTY
+				 , A.PROD_QTY
+				 , 0 AS RTN_QTY, 0 AS INV_ADJ_QTY
+				FROM (
+					SELECT A.ITM_CODE
+					     , A.LOT_NO
+						 , SUM(A.PROD_QTY) AS PROD_QTY
+						FROM (
+							-- 제품 생산
+							SELECT B.ITM_CODE					-- 관리 코드
+								 , A.LOT_NO						-- LOT_NO
+								 , A.PROD_APP_QTY AS PROD_QTY	-- 생산 수량
+								FROM CD_LOT_MST AS A
+								INNER JOIN CD_PRODUCT_CMN AS B ON A.SCAN_CODE = B.SCAN_CODE
+							   WHERE A.PROD_DT = @V_CUR_DATE
+								 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND B.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+								 AND A.CFM_FLAG = 'Y'
+							UNION ALL
+							-- 제품 생산(BOM)
+							SELECT B.ITM_CODE						-- 관리 코드
+								 , A.LOT_NO							-- LOT_NO
+								 , SUM(A.COMP_APP_QTY) AS PROD_QTY 	-- 생산 수량
+								FROM PD_BOM_SET_HIST AS A
+								INNER JOIN CD_PRODUCT_CMN AS B ON A.BOM_SET_COMP_CD = B.SCAN_CODE
+							   WHERE A.PROD_DT = @V_CUR_DATE
+								 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND B.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+								 AND A.CFM_FLAG = 'Y'
+							   GROUP BY B.ITM_CODE, A.LOT_NO
+							UNION ALL
+							-- 제품 생산(SET BOM)
+							--SELECT B.ITM_CODE					-- 관리 코드
+							--	 , ISNULL(A.LOT_NO, '') AS LOT_NO						-- LOT_NO
+							--	 , SUM(A.COMP_QTY) AS PROD_QTY 	-- 생산 수량
+							--	FROM PD_SET_RESULT_COMP AS A
+							--	INNER JOIN CD_PRODUCT_CMN AS B ON A.SET_COMP_CD = B.SCAN_CODE
+							--   WHERE A.PROD_DT = @V_CUR_DATE
+							--	 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND B.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+							--	 AND A.RESTORE_YN = 'N'
+							--   GROUP BY B.ITM_CODE, A.LOT_NO
+							--UNION ALL
+							-- 부자재 사용(루뎅, 띠라벨, 패드)
+							SELECT B.ITM_CODE
+							     , '' AS LOT_NO
+							     , SUM(A.INPUT_QTY) * (-1) AS PROD_QTY
+								FROM W_MAT_USAGE AS A
+								INNER JOIN CD_PRODUCT_CMN AS B ON A.COMP_CODE = B.SCAN_CODE
+							   GROUP BY B.ITM_CODE
+							UNION ALL
+							-- 부자재 사용(공박스)
+							SELECT B.ITM_CODE
+							     , '' AS LOT_NO
+							     , SUM(A.INPUT_QTY) * (-1) AS PROD_QTY
+								FROM W_EMPTY_BOX_DATA AS A
+								INNER JOIN CD_PRODUCT_CMN AS B ON A.COMP_CODE = B.SCAN_CODE
+							   GROUP BY B.ITM_CODE
+						) AS A
+					   GROUP BY A.ITM_CODE, A.LOT_NO
+				) AS A
+
+			UNION ALL
+	-- ************************************************************
+	-- 5. 매출반품(+)
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE, A.LOT_NO, 0 AS BASE_INV_QTY, 0 AS PUR_QTY, 0 AS SALE_QTY, 0 AS PROD_QTY
+				 , A.RTN_QTY AS RTN_QTY
+				 , 0 AS INV_ADJ_QTY
+				FROM (
+					SELECT CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(D.ITM_CODE, C.ITM_CODE) ELSE C.ITM_CODE END AS ITM_CODE	-- 관리 코드
+					     , ISNULL(E.LOT_NO, '') AS LOT_NO
+						 , CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(SUM(B.PICKING_QTY * ISNULL(D.IPSU_QTY, 1)), 0) ELSE ISNULL(SUM(B.PICKING_QTY), 0) END AS RTN_QTY
+						FROM PO_ORDER_HDR AS A
+						INNER JOIN VIEW_ORDER_DTL_SAMPLE_SUM AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+						LEFT OUTER JOIN CD_BOX_MST AS D ON C.ITM_CODE = D.BOX_CODE
+						LEFT OUTER JOIN PO_ORDER_LOT AS E ON B.ORD_NO = E.ORD_NO AND B.SCAN_CODE = E.SCAN_CODE
+					   WHERE A.DELIVERY_DEC_DT = @V_CUR_DATE
+						 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND C.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+						 AND A.ORD_STAT IN ('35', '40') -- 매출확정
+						 AND A.ORD_GB = '2'
+					   GROUP BY (CASE WHEN C.ITM_FORM = '2' AND D.BOX_CODE IS NOT NULL THEN ISNULL(D.ITM_CODE, C.ITM_CODE) ELSE C.ITM_CODE END), C.ITM_FORM, D.BOX_CODE, ISNULL(E.LOT_NO, '')
+				) AS A
+			UNION ALL
+	-- ************************************************************
+	-- 6. 재고조정(+,-)
+	-- ************************************************************
+			SELECT A.ITM_CODE AS ITM_CODE, A.LOT_NO, 0 AS BASE_INV_QTY, 0 AS PUR_QTY, 0 AS SALE_QTY, 0 AS PROD_QTY, 0 AS RTN_QTY
+				 , A.INV_ADJ_QTY
+				FROM (
+					SELECT CASE WHEN B.ITM_FORM = '2' THEN ISNULL(C.ITM_CODE, A.ITM_CODE) ELSE A.ITM_CODE END AS ITM_CODE
+					     , A.LOT_NO
+						 , CASE WHEN B.ITM_FORM = '2' THEN ISNULL(SUM(A.APP_QTY * ISNULL(C.IPSU_QTY, 1)), 0) ELSE ISNULL(SUM(A.APP_QTY), 0) END AS INV_ADJ_QTY
+						FROM IV_STOCK_ADJUST AS A
+						INNER JOIN CD_PRODUCT_CMN AS B ON A.SCAN_CODE = B.SCAN_CODE
+						LEFT OUTER JOIN CD_BOX_MST AS C ON A.ITM_CODE = C.BOX_CODE
+					   WHERE A.INV_DT = @V_CUR_DATE
+						 AND A.CFM_FLAG = 'Y'
+						 AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND B.ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+						 AND A.SEQ=(CASE WHEN A.INV_GB = '99' THEN (SELECT MAX(SEQ) FROM IV_STOCK_ADJUST AS T WHERE T.INV_DT = A.INV_DT AND T.ITM_CODE = A.ITM_CODE AND T.LOT_NO = A.LOT_NO AND T.INV_GB = '99') ELSE A.SEQ END )
+					   GROUP BY (CASE WHEN B.ITM_FORM = '2' THEN ISNULL(C.ITM_CODE, A.ITM_CODE) ELSE A.ITM_CODE END), B.ITM_FORM, A.LOT_NO
+				) AS A
+		)
+		INSERT INTO #TEMP_LOT_DATA
+		SELECT @V_CUR_DATE AS INV_DT
+		     , ITM_CODE
+			 , LOT_NO
+		     , SUM(BASE_INV_QTY) AS BASE_INV_QTY	-- 전일 재고 수량
+		     , SUM(PUR_QTY) AS PUR_QTY				-- 매입 수량
+		     , SUM(SALE_QTY) AS SALE_QTY			-- 매출[-] 수량
+		     , SUM(PROD_QTY) AS PROD_QTY			-- 생산 수량
+		     , SUM(RTN_QTY) AS RTN_QTY				-- 매입반품[-] 수량
+		     , SUM(INV_ADJ_QTY) AS INV_ADJ_QTY		-- 재고조정[+,-] 수량
+		     , SUM(BASE_INV_QTY) + SUM(PUR_QTY) + SUM(SALE_QTY) + SUM(PROD_QTY) + SUM(RTN_QTY) + SUM(INV_ADJ_QTY) AS INV_END_QTY		-- 기말 재고 수량
+			FROM W_LOT_DATA
+		   GROUP BY ITM_CODE, LOT_NO
+		   ;
+
+-- ************************************************************
+-- 90. 일 수불 집계 처리
+-- ************************************************************
+		SET @RETURN_CODE = 90;
+
+		IF EXISTS (SELECT 1 FROM #TEMP_DATA)
+		BEGIN
+			SET @RETURN_CODE = 91;
+
+			DELETE 
+				FROM IV_DT_ITEM_COLL 
+			   WHERE INV_DT = @V_CUR_DATE
+			     AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+			;
+
+			SET @RETURN_CODE = 92;
+
+			INSERT INTO IV_DT_ITEM_COLL 
+			(
+				INV_DT
+			  , ITM_CODE
+
+			  , BASE_INV_QTY
+			  , BASE_INV_WAMT
+			  , BASE_INV_WPRC
+			  , BASE_INV_WVAT
+
+			  , INV_END_QTY
+			  , INV_END_WAMT
+			  , INV_END_WPRC
+			  , INV_END_WVAT
+
+			  , PUR_QTY
+			  , PUR_WAMT
+			  , PUR_WPRC
+			  , PUR_WVAT
+
+			  , SALE_QTY
+			  , SALE_WAMT
+			  , SALE_WPRC
+			  , SALE_WVAT
+
+			  , PROD_QTY
+			  , PROD_WAMT
+			  , PROD_WPRC
+			  , PROD_WVAT
+
+			  , RTN_QTY
+			  , RTN_WAMT
+			  , RTN_WPRC
+			  , RTN_WVAT
+
+			  , INV_ADJ_QTY
+			  , INV_ADJ_WAMT
+			  , INV_ADJ_WPRC
+			  , INV_ADJ_WVAT
+
+			  , IDATE
+			)
+			SELECT @V_CUR_DATE
+			     , A.ITM_CODE
+
+				 , A.BASE_INV_QTY
+				 , A.BASE_INV_WAMT
+				 , A.BASE_INV_WPRC
+				 , A.BASE_INV_WVAT
+
+				 , A.INV_END_QTY
+				 , A.INV_END_WAMT
+				 , A.INV_END_WPRC
+				 , A.INV_END_WVAT
+
+				 , A.PUR_QTY
+				 , A.PUR_WAMT
+				 , A.PUR_WPRC
+				 , A.PUR_WVAT
+
+				 , A.SALE_QTY
+				 , A.SALE_WAMT
+				 , A.SALE_WPRC
+				 , A.SALE_WVAT
+
+				 , A.PROD_QTY
+				 , A.PROD_WAMT
+				 , A.PROD_WPRC
+				 , A.PROD_WVAT
+
+				 , A.RTN_QTY
+				 , A.RTN_WAMT
+				 , A.RTN_WPRC
+				 , A.RTN_WVAT
+
+				 , A.INV_ADJ_QTY
+				 , A.INV_ADJ_WAMT
+				 , A.INV_ADJ_WPRC
+				 , A.INV_ADJ_WVAT
+
+				 , GETDATE()
+				FROM #TEMP_DATA AS A
+				LEFT OUTER JOIN IV_DT_ITEM_COLL AS B ON B.INV_DT = @V_CUR_DATE AND A.ITM_CODE = B.ITM_CODE
+				WHERE B.ITM_CODE IS NULL
+
+			DROP TABLE #TEMP_DATA;
+		END
+
+-- ************************************************************
+-- 93. 일 수불 집계 처리 (LOT)
+-- ************************************************************
+		SET @RETURN_CODE = 93;
+
+		IF EXISTS (SELECT 1 FROM #TEMP_LOT_DATA)
+		BEGIN
+			SET @RETURN_CODE = 94;
+
+			DELETE 
+				FROM IV_DT_ITEM_LOT_COLL 
+			   WHERE INV_DT = @V_CUR_DATE
+			     AND 1=(CASE WHEN @P_ITM_CODE = '' THEN 1 WHEN @P_ITM_CODE != '' AND ITM_CODE = @P_ITM_CODE THEN 1 ELSE 2 END)
+			;
+
+
+			SET @RETURN_CODE = 95;
+
+			INSERT INTO IV_DT_ITEM_LOT_COLL 
+			(
+				INV_DT
+			  , ITM_CODE
+			  , LOT_NO
+			  , BASE_INV_QTY
+			  , INV_END_QTY
+			  , PUR_QTY
+			  , SALE_QTY
+			  , PROD_QTY
+			  , RTN_QTY
+			  , INV_ADJ_QTY
+			  , IDATE
+			)
+			SELECT @V_CUR_DATE
+			     , A.ITM_CODE
+				 , A.LOT_NO
+				 , A.BASE_INV_QTY
+				 , A.INV_END_QTY
+				 , A.PUR_QTY
+				 , A.SALE_QTY
+				 , A.PROD_QTY
+				 , A.RTN_QTY
+				 , A.INV_ADJ_QTY
+				 , GETDATE()
+				FROM #TEMP_LOT_DATA AS A
+				LEFT OUTER JOIN IV_DT_ITEM_LOT_COLL AS B ON B.INV_DT = @V_CUR_DATE AND A.ITM_CODE = B.ITM_CODE AND A.LOT_NO = B.LOT_NO
+				WHERE B.ITM_CODE IS NULL
+
+			DROP TABLE #TEMP_LOT_DATA;
+
+		END
+		
+		SET @RETURN_CODE = 99;
+
+		UPDATE TBL_BATCH_LOG
+			SET BATCH_STATUS = 'S'
+			  , END_TIME = GETDATE()
+			  , MSG = CONCAT('P_DATE: ', @P_DATE, ', P_ITM_CODE: ', @P_ITM_CODE)
+			WHERE SEQ = @V_MAX_SEQ
+			;
+
+		COMMIT;
+
+	END TRY
+	BEGIN CATCH		
+
+	    IF @@TRANCOUNT > 0
+		BEGIN
+			ROLLBACK TRAN;
+			
+			DROP TABLE IF EXISTS #TEMP_DATA;
+			DROP TABLE IF EXISTS #TEMP_LOT_DATA;
+
+			INSERT INTO TBL_BATCH_LOG
+			SELECT CONVERT(VARCHAR(8), GETDATE(), 112)
+				, 'PR_BATCH_DAILY_IV_ITEM_COLL'
+				, 'F'
+				, @V_START_TIME
+				, GETDATE()
+				, CONCAT(ERROR_MESSAGE(), ' / ', @RETURN_CODE)
+				, @V_MENUAL_YN
+			;
+			SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+		END;
+		
+	END CATCH
+END
+
+GO
+

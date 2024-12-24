@@ -1,0 +1,71 @@
+
+/*
+-- 생성자 :	최수민
+-- 등록일 :	2024.10.03
+-- 설 명  : 계근기록부
+-- 수정자 :	
+-- 수정일 :	
+-- 설 명  : 
+-- 실행문 : 
+
+EXEC PR_SCALE_LIST '','20240930'
+*/
+
+
+CREATE PROCEDURE [dbo].[PR_SCALE_LIST]
+( 
+	@P_IO_GB				INT				= 0,	-- 입출고구분(입고:1, 출고:2)
+	@P_IN_IDATE				NVARCHAR(8)		= ''	-- 계근일자
+)
+AS
+BEGIN
+
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	BEGIN TRY 
+		
+		-- 매출
+		SELECT DENSE_RANK() OVER (ORDER BY SC.IN_IDATE DESC, SC.ORD_NO) AS ROW_NUM
+			 , SC.ORD_NO								--주문번호
+			 , 2 AS IO_GB								--1.매입 , 2.매출 , 3.수입
+			 , '매출' AS IO_GB_NM							--매출입구분
+			 , SC.SCALE_DT 								--계근일자
+			 , PTN.VEN_NAME								--거래처명
+			 , TOP_DELI.DELIVERY_NAME AS TOP_DELI_NAME	--상위배송지
+			 , BOT_DELI.DELIVERY_NAME AS BOT_DELI_NAME	--하위배송지
+			 , CMN.ITM_NAME								--제품명
+			 , DTL.PICKING_QTY							--수량
+			 , CMN.WEIGHT_GB							--단위
+			 , SC.PLT_QTY11								--PLT11
+			 , SC.PLT_QTY12								--PLT12
+			 , SC.GROSS_WGHT							--총중량
+			 , SC.UNLOAD_WGHT							--공차중량
+			 , SC.NET_WGHT								--자차중량(순중량)
+			 , SC.OFFICIAL_WGHT							--타차중량
+			 , SC.GAP_WGHT								--차이중량
+			 , SC.BAG_QTY								--톤백/공백/피 수량
+			 , SC.REMARKS
+		  FROM PO_SCALE AS SC
+		 INNER JOIN PO_ORDER_HDR AS HDR ON SC.ORD_NO = HDR.ORD_NO
+		  LEFT OUTER JOIN CD_PARTNER_DELIVERY AS TOP_DELI ON HDR.DELIVERY_CODE = TOP_DELI.DELIVERY_CODE AND TOP_DELI.DELIVERY_GB = 1 	--상위 배송지
+		  LEFT OUTER JOIN CD_PARTNER_DELIVERY AS BOT_DELI ON HDR.DELIVERY_CODE = BOT_DELI.DELIVERY_CODE AND TOP_DELI.DELIVERY_GB = 2	--하위 배송지
+		 INNER JOIN PO_ORDER_DTL AS DTL ON SC.ORD_NO = DTL.ORD_NO
+		 INNER JOIN CD_PRODUCT_CMN AS CMN ON DTL.SCAN_CODE = CMN.SCAN_CODE
+		 INNER JOIN CD_PARTNER_MST AS PTN ON SC.VEN_CODE = PTN.VEN_CODE
+		 WHERE SC.SCALE_DT = @P_IN_IDATE
+
+	END TRY
+	
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+GO
+

@@ -1,0 +1,38 @@
+/*
+-- 생성자 :	이동호
+-- 등록일 :	2023.12.28
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  :  메뉴 리스트 TREE JSON 형식 변환
+-- 실행문 : SELECT dbo.FN_MENU_INFO_TREE_JSON(0, NULL, 0);
+*/
+CREATE FUNCTION [dbo].[FN_MENU_INFO_TREE_JSON](
+	@P_PARENTID INT,					-- 뎁스 시작점
+	@P_PATH NVARCHAR(1000),		-- 뎁스 표시
+	@P_DEPTH INT						-- 뎁스 표시 시작 값
+)
+RETURNS nvarchar(max)
+AS BEGIN
+
+RETURN (	
+	SELECT
+		T.SEQ,
+		T.MENU_CODE,
+		T.MENU_NM,			
+		T.MENU_GB,
+		T.MENU_ICON,
+		T.UP_MENU_CODE,
+		T.SORT_ORDER,
+		T.HELP,
+		T.DEL_YN,		
+		--PATHS = CONCAT(@P_PATH + ',', T.DEPT_CODE),
+		--DEPTH = @P_DEPTH + 1,
+		_children = JSON_QUERY(dbo.FN_MENU_INFO_TREE_JSON(T.MENU_CODE, CONCAT(@P_PATH + ',', T.MENU_CODE), @P_DEPTH + 1))
+	FROM TBL_MENU_INFO AS T WITH(NOLOCK) 
+	WHERE EXISTS (SELECT T.UP_MENU_CODE INTERSECT SELECT @P_PARENTID) ORDER BY T.SORT_ORDER ASC
+	FOR JSON PATH
+);
+END;
+
+GO
+

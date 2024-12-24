@@ -1,0 +1,42 @@
+/*
+-- 생성자 :	윤현빈
+-- 등록일 :	2024.04.04
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : SET 마스터 HDR 리스트 출력(팝업)
+-- 실행문 : 
+EXEC PR_SET_MST_HDR_LIST_POPUP '210001'
+*/
+CREATE PROCEDURE [dbo].[PR_SET_MST_HDR_LIST_POPUP]
+( 
+	@P_SCAN_CODE	NVARCHAR(14) = ''   -- 상품코드
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	BEGIN TRY 
+		SELECT  ROW_NUMBER() OVER(ORDER BY A.SET_CD ) AS ROW_NUM
+		     , A.SET_CD 
+		     , A.SET_NAME 
+		     , A.SET_PROD_CD 		     
+			 , CM.ITM_NAME_DETAIL AS SET_PROD_NM
+			FROM CD_SET_HDR AS A
+				INNER JOIN CD_PRODUCT_CMN AS CM ON A.SET_PROD_CD = CM.SCAN_CODE
+		   WHERE SET_PROD_CD = @P_SCAN_CODE AND USE_YN = 'Y'
+			ORDER BY A.SET_CD 
+	END TRY
+	
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+GO
+

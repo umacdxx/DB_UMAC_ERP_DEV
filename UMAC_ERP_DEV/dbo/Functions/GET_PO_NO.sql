@@ -1,0 +1,46 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.05.16
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명	: 수입 PO_NO 생성
+-- 실행문 : dbo.GET_PO_NO('20240516')
+*/
+CREATE FUNCTION [dbo].[GET_PO_NO](
+	@P_PO_ORD_DT NVARCHAR(8)
+)
+RETURNS NVARCHAR(15)
+AS
+BEGIN
+	DECLARE @L_PO_NO			NVARCHAR(15)						-- 신규PO번호
+	DECLARE @L_SEQ				NVARCHAR(3)							-- 신규PO SEQ
+	DECLARE @L_PO_ORD_DT		NVARCHAR(8)							-- 발주일
+
+	SET @L_PO_ORD_DT = SUBSTRING(@P_PO_ORD_DT, 3, 4);
+
+	--SEQ 생성
+	SELECT @L_SEQ = ISNULL(MAX(CONVERT(INT, SUBSTRING(PO_NO, 7, 2))),0) + 1
+	FROM IM_ORDER_HDR
+	WHERE SUBSTRING(PO_ORD_DT, 3, 4) = @L_PO_ORD_DT
+	  
+
+	IF LEN(@L_SEQ) = 1
+		BEGIN
+			SET @L_SEQ = CONCAT('0', @L_SEQ)
+		END
+	ELSE IF LEN(@L_SEQ) = 2
+		BEGIN
+			SET @L_SEQ = @L_SEQ
+		END
+	ELSE
+		BEGIN
+			SET @L_SEQ = '01'
+		END
+	 
+	SET @L_PO_NO = CONCAT('PO', @L_PO_ORD_DT, @L_SEQ); -- PO230901~99
+
+RETURN @L_PO_NO
+END
+
+GO
+

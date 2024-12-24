@@ -1,0 +1,139 @@
+/*
+-- 생성자 :	최수민
+-- 등록일 :	2024.08.30
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 대두유 국제시세 저장
+-- 실행문 : PR_IM_SOYBEAN_PRICE_PUT
+*/
+CREATE PROCEDURE [dbo].[PR_IM_SOYBEAN_PRICE_PUT]
+	@P_PRICE_DATE         NVARCHAR(15),		-- 가격일자(시세일자)
+	@P_PRICE_MONTH_1      NVARCHAR(10),		-- 선적월_1
+	@P_PRICE_MONTH_2      NVARCHAR(10),		-- 선적월_2
+	@P_PRICE_MONTH_3      NVARCHAR(10),		-- 선적월_3
+	@P_PRICE_1            NUMERIC(15,2),	-- 가격_1
+	@P_PRICE_2            NUMERIC(15,2),	-- 가격_2
+	@P_PRICE_3            NUMERIC(15,2),	-- 가격_3
+	@P_NEAR_MTH_NORTH     INT,				-- 근원물_북미
+	@P_NEAR_MTH_SOUTH     INT,				-- 근원물_남미
+	@P_CURRENT_MTH_NORTH  INT,				-- 원월물_북미
+	@P_CURRENT_MTH_SOUTH  INT,				-- 원월물_남미
+	@P_NEAR_MTH_BASIS     NUMERIC(15,2),	-- 근월물 basis
+	@P_CURRENT_MTH_BASIS  NUMERIC(15,2),	-- 원월물 basis
+	@P_NEAR_SELECT		  INT,				-- 근월물 선택
+	@P_CURRENT_SELECT     INT,				-- 원월물 선택
+	@P_REMARKS            NVARCHAR(100),	-- 비고
+	@P_EMP_ID             NVARCHAR(50),		-- 아이디
+	@P_MODE               NVARCHAR(1)		-- I: 등록, U: 수정, D: 삭제
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	 
+	DECLARE @RETURN_CODE INT = 0									-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) = DBO.GET_ERR_MSG('0')		-- 리턴메시지
+
+	BEGIN TRAN
+	BEGIN TRY 
+	 
+		IF @P_MODE <> 'D'
+			BEGIN
+				
+				DECLARE @R_COUNT INT;
+				SELECT @R_COUNT = COUNT(1) FROM IM_SOYBEAN_PRICE WHERE PRICE_DATE = @P_PRICE_DATE;
+
+				IF @R_COUNT > 0
+				BEGIN 
+					UPDATE IM_SOYBEAN_PRICE
+					SET 
+						PRICE_MONTH_1 = @P_PRICE_MONTH_1,
+						PRICE_MONTH_2 = @P_PRICE_MONTH_2,
+						PRICE_MONTH_3 = @P_PRICE_MONTH_3,
+						PRICE_1 = @P_PRICE_1,
+						PRICE_2 = @P_PRICE_2,
+						PRICE_3 = @P_PRICE_3,
+						NEAR_MTH_NORTH = @P_NEAR_MTH_NORTH,
+						NEAR_MTH_SOUTH = @P_NEAR_MTH_SOUTH,
+						CURRENT_MTH_NORTH = @P_CURRENT_MTH_NORTH,
+						CURRENT_MTH_SOUTH = @P_CURRENT_MTH_SOUTH,
+						NEAR_MTH_BASIS = @P_NEAR_MTH_BASIS,
+						CURRENT_MTH_BASIS = @P_CURRENT_MTH_BASIS,
+						NEAR_SELECT = @P_NEAR_SELECT,
+						CURRENT_SELECT = @P_CURRENT_SELECT,
+						REMARKS = @P_REMARKS,
+						IEMP_ID = @P_EMP_ID
+					WHERE PRICE_DATE = @P_PRICE_DATE;
+
+				END
+				ELSE
+				BEGIN
+					INSERT INTO IM_SOYBEAN_PRICE
+					(
+						PRICE_DATE, 
+						PRICE_MONTH_1, 
+						PRICE_MONTH_2, 
+						PRICE_MONTH_3, 
+						PRICE_1, 
+						PRICE_2, 
+						PRICE_3, 
+						NEAR_MTH_NORTH, 
+						NEAR_MTH_SOUTH, 
+						CURRENT_MTH_NORTH, 
+						CURRENT_MTH_SOUTH, 
+						NEAR_MTH_BASIS, 
+						CURRENT_MTH_BASIS, 
+						NEAR_SELECT,
+						CURRENT_SELECT,
+						REMARKS, 
+						IEMP_ID
+					)
+					VALUES
+					(
+						@P_PRICE_DATE, 
+						@P_PRICE_MONTH_1, 
+						@P_PRICE_MONTH_2, 
+						@P_PRICE_MONTH_3, 
+						@P_PRICE_1, 
+						@P_PRICE_2, 
+						@P_PRICE_3, 
+						@P_NEAR_MTH_NORTH, 
+						@P_NEAR_MTH_SOUTH, 
+						@P_CURRENT_MTH_NORTH, 
+						@P_CURRENT_MTH_SOUTH, 
+						@P_NEAR_MTH_BASIS, 
+						@P_CURRENT_MTH_BASIS, 
+						@P_NEAR_SELECT,
+						@P_CURRENT_SELECT,
+						@P_REMARKS, 
+						@P_EMP_ID
+					);
+				END
+
+			END
+			ELSE IF @P_MODE = 'D'
+			BEGIN
+				DELETE FROM IM_SOYBEAN_PRICE WHERE PRICE_DATE = @P_PRICE_DATE;
+			END
+				
+
+        COMMIT TRAN;
+			 
+	END TRY
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+
+        ROLLBACK TRANSACTION;
+
+		SET @RETURN_CODE = -1 -- 저장실패
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1')
+	END CATCH
+	
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+END
+
+GO
+

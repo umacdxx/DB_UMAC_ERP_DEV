@@ -1,0 +1,110 @@
+
+/*
+
+-- 생성자 :	이동호
+-- 등록일 :	2024.05.23
+-- 수정자 : -
+-- 설 명  : 가상계좌 발급 MST
+-- 실행문 : 
+
+*/
+CREATE PROCEDURE [dbo].[PR_ACCT_MST_PUT]
+( 	
+	@P_VEN_CODE			NVARCHAR(7),	-- 거래처코드
+	@P_BANK_CODE		NVARCHAR(2),	-- 토스은행코드
+	@P_VACT_NO			NVARCHAR(100),	-- 가상계좌번호
+	@P_VACT_NO_KEY		NVARCHAR(10),	-- 가상계좌번호KEY
+	@P_TID				NVARCHAR(100),	-- PG거래아이디
+	@P_MOID				NVARCHAR(100),	-- 주문번호
+	@P_REQ_AMT			INT,			-- 입금요청금액
+	@P_DEPOSIT_AMT		INT,			-- 입금금액
+	@P_VACT_DATE		NVARCHAR(8),	-- 가상계좌만료일자
+	@P_VACT_TIME		NVARCHAR(5),	-- 가상계좌만료시간
+	@P_VACT_STAT		NVARCHAR(30),	-- 가상계좌 결제 처리상태
+	@P_IEMP_ID			NVARCHAR(20)	-- 등록아이디
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	DECLARE @RETURN_CODE INT = 0									-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE NVARCHAR(MAX) = DBO.GET_ERR_MSG('0')	-- 리턴메시지
+	DECLARE @ISSUE_DT VARCHAR(8) = FORMAT(GETDATE(), 'yyyyMMdd')
+	
+	
+
+	BEGIN TRAN
+	BEGIN TRY 						
+	
+		EXEC UMAC_CERT_OPEN_KEY; -- OPEN
+					
+		DECLARE @PA_ACCT_MST TABLE (
+			VEN_CODE NVARCHAR(7)			
+		)
+
+		INSERT INTO @PA_ACCT_MST (VEN_CODE) SELECT VEN_CODE FROM PA_ACCT_MST WHERE VEN_CODE = @P_VEN_CODE
+		
+		--거래처별 가상계좌 정보 등록
+		IF EXISTS(SELECT VEN_CODE FROM PA_ACCT_MST WHERE VEN_CODE = @P_VEN_CODE)
+		BEGIN
+			UPDATE PA_ACCT_MST SET BANK_CODE = @P_BANK_CODE, 
+							VACT_NO = DBO.GET_ENCRYPT(@P_VACT_NO), 
+							VACT_NO_KEY = @P_VACT_NO_KEY 	
+				WHERE VEN_CODE = @P_VEN_CODE
+		END
+		ELSE 
+		BEGIN
+			INSERT INTO PA_ACCT_MST(
+										VEN_CODE, 
+										BANK_CODE, 
+										VACT_NO, 
+										VACT_NO_KEY, 
+										IDATE, 
+										IEMP_ID
+									) VALUES (
+										@P_VEN_CODE, 
+										@P_BANK_CODE, 
+										DBO.GET_ENCRYPT(@P_VACT_NO), 
+										@P_VACT_NO_KEY,  
+										GETDATE(), 
+										@P_IEMP_ID																			
+									)			
+		END
+		
+		
+		--거래처별 가상계좌 발급내역 등록
+		INSERT INTO PA_ACCT_ISSUE (ISSUE_DT, VEN_CODE, TID, MOID, BANK_CODE, VACT_NO, REQ_AMT, DEPOSIT_AMT, VACT_STAT, VACT_DATE, VACT_TIME, RECEIVE_YN, IDATE, IEMP_ID)
+			SELECT @ISSUE_DT, @P_VEN_CODE, @P_TID, @P_MOID, @P_BANK_CODE, DBO.GET_ENCRYPT(@P_VACT_NO), @P_REQ_AMT, @P_DEPOSIT_AMT, @P_VACT_STAT, @P_VACT_DATE, @P_VACT_TIME, 'N', GETDATE(), @P_IEMP_ID
+
+
+		SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+	
+		EXEC UMAC_CERT_CLOSE_KEY -- CLOSE
+
+		COMMIT;
+	
+	END TRY
+	BEGIN CATCH	
+				
+		IF @@TRANCOUNT > 0
+		BEGIN 
+			ROLLBACK TRAN
+						
+			--에러 로그 테이블 저장
+			INSERT INTO TBL_ERROR_LOG 
+			SELECT ERROR_PROCEDURE()			-- 프로시저명
+					, ERROR_MESSAGE()			-- 에러메시지
+					, ERROR_LINE()				-- 에러라인
+					, GETDATE()	
+
+			
+			SELECT -1 AS RETURN_CODE, ERROR_MESSAGE() AS RETURN_MESSAGE
+
+			EXEC UMAC_CERT_CLOSE_KEY -- CLOSE
+		END 
+	END CATCH
+
+END
+
+GO
+

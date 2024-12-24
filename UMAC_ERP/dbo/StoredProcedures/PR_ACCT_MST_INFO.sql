@@ -1,0 +1,49 @@
+/*
+-- 생성자 :	이동호
+-- 등록일 :	2024.05.24
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 거래처 가상계좌 정보 출력
+-- 실행문 : 
+	
+	EXEC PR_ACCT_MST_INFO ''
+
+*/
+CREATE PROCEDURE [dbo].[PR_ACCT_MST_INFO]
+( 
+	@P_VEN_CODE	NVARCHAR(7) = ''	-- 거래처코드
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+
+	 
+	BEGIN TRY 
+	EXEC UMAC_CERT_OPEN_KEY; -- OPEN
+
+		SELECT  
+			VEN_CODE,
+			BANK_CODE,
+			DBO.GET_DECRYPT(VACT_NO) AS VACT_NO,
+			VACT_NO_KEY,			
+			FORMAT(IDATE, 'yyyy-MM-dd') AS IDATE
+		FROM PA_ACCT_MST
+			WHERE VEN_CODE = @P_VEN_CODE
+			
+	EXEC UMAC_CERT_CLOSE_KEY -- CLOSE
+	END TRY
+	
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+GO
+

@@ -1,0 +1,53 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.05.21
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 수입제비용 DTL 조회
+-- 실행문 : 
+EXEC PR_IM_COST_DTL_LIST ''
+*/
+CREATE PROCEDURE [dbo].[PR_IM_COST_DTL_LIST]
+( 
+	@P_PO_NO		NVARCHAR(15) = ''		-- PO번호
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+ 
+	BEGIN TRY 
+		SELECT A.PO_NO, 
+			   A.SEQ,
+			   CONCAT(SUBSTRING(A.COST_DT, 1,4), '-',SUBSTRING(A.COST_DT, 5,2), '-', SUBSTRING(A.COST_DT, 7,2)) AS COST_DT,
+			   A.COST_VEN_CODE,
+			   A.COST_ITM_CODE,
+			   A.NOTE,
+			   ISNULL(A.COST_WPRC, 0) AS COST_WPRC,
+			   ISNULL(A.COST_WVAT, 0) AS COST_WVAT,
+			   ISNULL(A.COST_AMOUNT, 0) AS COST_AMOUNT,
+               A.COST_SLIP,
+			   (CASE WHEN A.COST_SLIP = 'Y' THEN '확정' ELSE '미확정' END) AS COST_SLIP_NAME,
+			   A.COST_SLIP_DT,
+			   A.BL_NO,
+               B.COST_VEN_NAME,
+               C.COST_NAME
+		FROM IM_COST_DTL AS A
+			INNER JOIN IM_COST_STORE AS B ON A.COST_VEN_CODE = B.COST_VEN_CODE
+            INNER JOIN IM_COST_ITM AS C ON A.COST_ITM_CODE = C.COST_ITM_CODE
+		WHERE PO_NO = @P_PO_NO;
+
+	END TRY
+	
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+GO
+

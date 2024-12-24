@@ -1,0 +1,484 @@
+
+/*
+
+-- 생성자 :	이동호
+-- 등록일 :	2024.04.09
+-- 수정자 : 2024.11.11 강세미 - 마감중량(CLOSE_WGHT) 처리 추가
+-- 수정자 : 2024.11.12 이동호 - 반품처리시 LOT 생성 로직 수정
+			2024.11.20 강세미 - 입고수량 있을 때 검수확정으로 상태변경 추가
+			2024.11.21 이동호 - CURSOR 변수 값 초기화 수정
+			2024.11.25 강세미 - 중량제품 타차중량 수정 시 입출고 수량 변경
+			2024.12.18 강세미 - 타차중량 최신 수정자 추가
+-- 설 명  : 입출고예정조회 > 계근대 정보 등록
+-- 실행문 : 
+
+*/
+CREATE PROCEDURE [dbo].[PR_WMS_SCALE_PUT]
+( 
+	@P_ORD_NO				NVARCHAR(11) = '',	-- 주문(발주)번호	
+	@P_SCALE_DT				NVARCHAR(8) = '',	-- 계근일자
+	@P_CAR_GB				NVARCHAR(1) = '',	-- 차량구분
+	@P_CAR_NO				NVARCHAR(8) = '',	-- 차량번호
+	@P_PLT_QTY11			INT = 0,			-- 파렛트11형수량
+	@P_PLT_QTY12			INT = 0,			-- 파렛트12형수량
+	@P_GROSS_WGHT			INT = 0,			-- 총중량
+	@P_UNLOAD_WGHT			INT = 0,			-- 공차중량
+	@P_NET_WGHT				INT = 0,			-- 자차중량
+	@P_BAG_GB				NVARCHAR(1) = '',	-- 피중량 구분
+	@P_BAG_QTY				INT = 0,			-- 피중량 수량
+	@P_BAG_WGHT				NUMERIC(15,2),		-- 피중량 무게
+	@P_OFFICIAL_WGHT		INT,				-- 타차중량
+	@P_GAP_WGHT				INT,				-- 차이중량
+	@P_CENTER_GB			NVARCHAR(2),		-- 상하차장소
+	@P_REMARKS				NVARCHAR(2000),		-- 비고
+	@P_PRODUCT_JSDATA		NVARCHAR(MAX),		-- 주문 제품 LIST
+	@P_UEMP_ID				NVARCHAR(20)		-- 사용자아이디
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	DECLARE @RETURN_CODE INT = 0									-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE NVARCHAR(MAX) = DBO.GET_ERR_MSG('0')	-- 리턴메시지
+	DECLARE @IO_GB INT = LEFT(@P_ORD_NO, 1)							-- 입/출고 구분 > 2 : 출고, 1 : 입고
+	DECLARE @ENTRANCE_YN NVARCHAR(1) = 'N'							-- 입차여부
+
+	DECLARE @ORD_DT NVARCHAR(8) = ''
+	DECLARE @VEN_CODE NVARCHAR(7) = ''
+	DECLARE @ORD_GB INT = 1	
+	DECLARE @DELIVERY_REQ_DT NVARCHAR(8) = ''
+
+	DECLARE @ORD_NO NVARCHAR(11) = '',
+			@UNLOAD_WGHT INT = 0,
+			@GROSS_WGHT INT = 0,
+			@OFFICIAL_WGHT INT = 0
+
+	DECLARE @IN_IDATE DATETIME	--계근대 최초 진입 일자
+	
+	DECLARE @LOT_NO NVARCHAR(30) = '',			--LOT 번호
+			@LOT_NO_INFO NVARCHAR(50) = '',		--LOT 생성 함수 RETURN VALUE : {LOT 번호}|{소비기한}
+			@LOT_SCAN_CODE NVARCHAR(14) = '',	--LOT 생성시 적용되는 스캔코드	
+			@QTY NUMERIC(15,2),					--수/중량
+			@EXPIRY_DAY NVARCHAR(8) = '',		--LOT 소비기한 일자
+			@DELIVERY_DEC_DT NVARCHAR(8) = '',	--LOT 생산 일자
+			@PROD_GB NVARCHAR(1) = '',			--생산구분(B:BOM, S:SET, K:벌크)
+			@CFM_FLAG NVARCHAR(2) = 'N'			--LOT MST 확정여부
+
+	DECLARE @WEIGHT_GB NVARCHAR(3) = ''
+	DECLARE @SUM_QTY NUMERIC(15,2) = 0			--총 입출고수량
+
+	BEGIN TRAN
+	BEGIN TRY 					
+						
+		SELECT @ORD_DT = A.ORD_DT, @ORD_GB = ORD_GB, @VEN_CODE = A.VEN_CODE, @DELIVERY_REQ_DT = A.DELIVERY_REQ_DT FROM (
+			SELECT ORD_NO, ORD_DT, ORD_GB, VEN_CODE, DELIVERY_REQ_DT FROM PO_ORDER_HDR
+			UNION ALL
+			SELECT ORD_NO, ORD_DT, 1 AS ORD_GB, VEN_CODE, '' AS DELIVERY_REQ_DT FROM PO_PURCHASE_HDR
+		) AS A WHERE ORD_NO = @P_ORD_NO
+
+		--************************************
+		--***** 1.계근정보 업데이트 **********
+		--************************************
+		SET @P_GROSS_WGHT = ISNULL(@P_GROSS_WGHT, 0)
+		SET @P_UNLOAD_WGHT = ISNULL(@P_UNLOAD_WGHT, 0)
+		SET @P_OFFICIAL_WGHT = ISNULL(@P_OFFICIAL_WGHT, 0)
+
+		IF (@IO_GB = 1 AND @P_GROSS_WGHT <> 0) OR (@IO_GB = 2 AND @P_UNLOAD_WGHT <> 0)
+		BEGIN
+			SET @ENTRANCE_YN = 'Y'
+		END
+			
+		SELECT @ORD_NO = ORD_NO, @GROSS_WGHT = ISNULL(GROSS_WGHT, 0), @UNLOAD_WGHT = ISNULL(UNLOAD_WGHT, 0), @OFFICIAL_WGHT = ISNULL(OFFICIAL_WGHT, 0), @IN_IDATE = IN_IDATE FROM PO_SCALE WHERE ORD_NO = @P_ORD_NO
+ 
+		IF @ORD_NO IS NOT NULL AND @ORD_NO <> ''
+		BEGIN 
+			
+			IF ISNULL(@IN_IDATE,'') = ''
+			BEGIN
+				UPDATE PO_SCALE SET IN_IDATE = GETDATE() WHERE ORD_NO = @P_ORD_NO 
+			END 
+
+			UPDATE PO_SCALE SET 
+					SCALE_DT= @P_SCALE_DT,
+					CAR_GB = @P_CAR_GB,
+					CAR_NO = @P_CAR_NO,
+					PLT_QTY11 = @P_PLT_QTY11,
+					PLT_QTY12 = @P_PLT_QTY12,
+					GROSS_WGHT = @P_GROSS_WGHT,
+					UNLOAD_WGHT = @P_UNLOAD_WGHT,
+					NET_WGHT = @P_NET_WGHT,
+					BAG_GB = @P_BAG_GB,
+					BAG_QTY = @P_BAG_QTY,
+					BAG_WGHT = @P_BAG_WGHT,
+					OFFICIAL_WGHT = @P_OFFICIAL_WGHT,
+					GAP_WGHT = @P_GAP_WGHT,
+					CLOSE_WGHT = ( CASE WHEN @P_OFFICIAL_WGHT > 0 THEN @P_OFFICIAL_WGHT WHEN @P_NET_WGHT > 0 THEN @P_NET_WGHT ELSE CLOSE_WGHT END ), -- 타차중량 없는 경우만 자차중량으로 업데이트
+					CENTER_GB = @P_CENTER_GB,
+					GROSS_WGHT_DT = ( CASE WHEN @P_GROSS_WGHT > 0 AND @P_GROSS_WGHT <> @GROSS_WGHT  THEN GETDATE() ELSE PO_SCALE.GROSS_WGHT_DT END ),			-- 총중량 무게 ( 기존 무게랑 값이 틀리면 업데이트)
+					UNLOAD_WGHT_DT = ( CASE WHEN @P_UNLOAD_WGHT > 0 AND @P_UNLOAD_WGHT <> @UNLOAD_WGHT THEN GETDATE() ELSE PO_SCALE.UNLOAD_WGHT_DT END ),	-- 공차중량 무게 ( 기존 무게랑 값이 틀리면 업데이트)
+					OFFICIAL_WGHT_DT = ( CASE WHEN @P_OFFICIAL_WGHT > 0 AND @P_OFFICIAL_WGHT <> @OFFICIAL_WGHT THEN GETDATE() ELSE PO_SCALE.OFFICIAL_WGHT_DT END ),	-- 타차중량 등록일자 ( 기존 무게랑 값이 틀리면 업데이트)
+					OFFICIAL_WGHT_UEMP_ID = ( CASE WHEN @P_OFFICIAL_WGHT > 0 AND @P_OFFICIAL_WGHT <> @OFFICIAL_WGHT THEN @P_UEMP_ID ELSE PO_SCALE.OFFICIAL_WGHT_UEMP_ID END ),
+					UDATE = GETDATE(), 
+					UEMP_ID = @P_UEMP_ID, 
+					ENTRANCE_YN = @ENTRANCE_YN,
+					REMARKS = @P_REMARKS
+			WHERE ORD_NO = @P_ORD_NO
+
+			SET @RETURN_MESSAGE = '수정되었습니다.'
+
+		END
+		ELSE
+		BEGIN
+			
+			INSERT INTO PO_SCALE (
+				ORD_NO, 
+				ORD_DT, 
+				VEN_CODE, 
+				SCALE_DT, 
+				CAR_GB, 
+				CAR_NO, 
+				PLT_QTY11, 
+				PLT_QTY12, 
+				GROSS_WGHT, 
+				UNLOAD_WGHT, 
+				NET_WGHT,
+				BAG_GB, 
+				BAG_QTY, 
+				BAG_WGHT, 
+				OFFICIAL_WGHT, 
+				GAP_WGHT, 
+				CLOSE_WGHT,
+				CENTER_GB, 
+				GROSS_WGHT_DT, 
+				UNLOAD_WGHT_DT, 
+				OFFICIAL_WGHT_DT, 
+				OFFICIAL_WGHT_UEMP_ID,
+				IDATE, 
+				IEMP_ID, 
+				ENTRANCE_YN,
+				IN_IDATE,
+				REMARKS
+			) 
+			VALUES (
+				@P_ORD_NO, 
+				@ORD_DT, 
+				@VEN_CODE, 
+				@P_SCALE_DT, 
+				@P_CAR_GB, 
+				@P_CAR_NO, 
+				@P_PLT_QTY11, 
+				@P_PLT_QTY12, 
+				@P_GROSS_WGHT, 
+				@P_UNLOAD_WGHT, 
+				@P_NET_WGHT, 
+				@P_BAG_GB, 
+				@P_BAG_QTY, 
+				@P_BAG_WGHT, 
+				@P_OFFICIAL_WGHT, 
+				@P_GAP_WGHT, 
+				( CASE WHEN @P_OFFICIAL_WGHT > 0 THEN @P_OFFICIAL_WGHT WHEN @P_NET_WGHT > 0 THEN @P_NET_WGHT ELSE NULL END ),
+				@P_CENTER_GB, 
+				( CASE WHEN @P_GROSS_WGHT > 0 AND @P_GROSS_WGHT <> @GROSS_WGHT THEN GETDATE() ELSE NULL END ),
+				( CASE WHEN @P_UNLOAD_WGHT > 0 AND @P_UNLOAD_WGHT <> @UNLOAD_WGHT THEN GETDATE() ELSE NULL END ),
+				( CASE WHEN @P_OFFICIAL_WGHT > 0 AND @P_OFFICIAL_WGHT <> @OFFICIAL_WGHT THEN GETDATE() ELSE NULL END ),
+				( CASE WHEN @P_OFFICIAL_WGHT > 0 AND @P_OFFICIAL_WGHT <> @OFFICIAL_WGHT THEN @P_UEMP_ID ELSE NULL END ),
+				GETDATE(), 
+				@P_UEMP_ID, 
+				@ENTRANCE_YN,
+				GETDATE(),
+				@P_REMARKS
+			)
+
+			--PLT 등록된 정보가 있으면 계근대 PLT수량 업데이트
+			UPDATE PO_SCALE SET
+				PLT_QTY11 = OPLT.PLT_QTY11,
+				PLT_QTY12 = OPLT.PLT_QTY12 		
+			FROM  (
+					SELECT 
+						ORD_NO, 
+						(SUM(ISNULL(PLT_AJ_QTY11,0)) + SUM(ISNULL(PLT_KPP_QTY11,0))) AS PLT_QTY11,
+						(SUM(ISNULL(PLT_AJ_QTY12,0)) + SUM(ISNULL(PLT_KPP_QTY12,0))) AS PLT_QTY12
+					FROM PO_ORDER_PLT WHERE ORD_NO = @P_ORD_NO GROUP BY ORD_NO
+				) AS OPLT WHERE PO_SCALE.ORD_NO = OPLT.ORD_NO					 		
+		END
+				
+
+		--****************************************
+		--***** 2.주문정보 HDR, DTL 업데이트 *****
+		--****************************************			
+		DECLARE CURSOR_ORD_PRODUCT CURSOR FOR			
+				
+			SELECT T1.ORD_NO, T1.GUBUN, T1.SCAN_CODE, T1.WEIGHT_GB, T1.QTY, T1.LOT_NO, T2.BOM_GB, T2.SET_GB, CM2.SCAN_CODE AS BX_SCAN_CODE
+				FROM OPENJSON ( @P_PRODUCT_JSDATA, '$.PRODUCT_LIST' )   
+				WITH (    
+					ORD_NO NVARCHAR(11)			'$.ORD_NO',					
+					GUBUN NVARCHAR(1)			'$.GUBUN',
+					SCAN_CODE NVARCHAR(14)		'$.SCAN_CODE',
+					WEIGHT_GB NVARCHAR(3)		'$.WEIGHT_GB',					
+					QTY NVARCHAR(25)			'$.QTY',
+					LOT_NO NVARCHAR(30)			'$.LOT_NO'					
+				) AS T1 
+					INNER JOIN CD_PRODUCT_CMN AS T2 
+						ON T1.SCAN_CODE = T2.SCAN_CODE
+					LEFT OUTER JOIN CD_BOX_MST AS BX 
+						ON T2.ITM_CODE  = BX.BOX_CODE
+					LEFT OUTER JOIN CD_PRODUCT_CMN AS CM2 
+						ON BX.ITM_CODE  = CM2.ITM_CODE
+					
+					
+		OPEN CURSOR_ORD_PRODUCT
+
+		DECLARE @C_ORD_NO NVARCHAR(11),
+				@C_GUBUN NVARCHAR(1),
+				@C_SCAN_CODE NVARCHAR(14),
+				@C_WEIGHT_GB NVARCHAR(3),
+				@C_QTY NVARCHAR(25),
+				@C_LOT_NO NVARCHAR(30),
+				@C_BOM_GB NVARCHAR(1),
+				@C_SET_GB NVARCHAR(1),
+				@BX_SCAN_CODE NVARCHAR(14)	--BOX제품의 단품 스캔코드
+							
+		FETCH NEXT FROM CURSOR_ORD_PRODUCT INTO @C_ORD_NO, @C_GUBUN, @C_SCAN_CODE, @C_WEIGHT_GB, @C_QTY, @C_LOT_NO, @C_BOM_GB, @C_SET_GB, @BX_SCAN_CODE
+		WHILE(@@FETCH_STATUS=0)
+		BEGIN
+							
+			SET @C_QTY = IIF(@C_QTY = '', '0', @C_QTY);
+			SET @QTY = CONVERT(NUMERIC(15,2), @C_QTY);
+			SET @WEIGHT_GB = @C_WEIGHT_GB;
+			SET @PROD_GB = '';
+			SET @CFM_FLAG = '';
+			SET @LOT_NO = ''
+			SET @LOT_NO_INFO = ''
+			SET @LOT_SCAN_CODE = @C_SCAN_CODE
+			SET @SUM_QTY =+ @QTY;
+			
+			--*************************			
+			--***** 주문(출고) ********			
+			--*************************		
+			IF @IO_GB = 2
+			BEGIN		
+									
+				--*******************************************************************************************
+				--LOT 생성 : 중량 제품 중 제품마스타에 LOT 유종 및 소비기한(개월) 입력되어 있으면 LOT번호 생성, 반품주문 
+				--*******************************************************************************************
+				IF @C_WEIGHT_GB = 'WT' OR @ORD_GB = 2
+				BEGIN
+
+					--***** 샘플 제품 수량 업데이트 *****
+					IF @C_GUBUN = 'S'
+					BEGIN
+						--********************
+						--PO_ORDER_SAMPLE UPDATE 
+						--********************
+						UPDATE PO_ORDER_SAMPLE SET 
+							PICKING_QTY = @QTY, 
+							UDATE = GETDATE(), 
+							UEMP_ID = @P_UEMP_ID 
+						WHERE ORD_NO = @P_ORD_NO AND SCAN_CODE = @C_SCAN_CODE
+					END
+					ELSE
+					BEGIN
+
+						--********************
+						--PO_ORDER_DTL UPDATE 
+						--********************
+						UPDATE PO_ORDER_DTL SET 
+							--PICKING_QTY = @QTY, 
+							PICKING_QTY = CASE WHEN @P_OFFICIAL_WGHT > 0 THEN @P_OFFICIAL_WGHT ELSE @QTY END, 
+							PICKING_SPRC = PO_ORDER_DTL.ORD_SPRC, 
+							PICKING_SVAT = PO_ORDER_DTL.ORD_SVAT, 
+							PICKING_SAMT = (PO_ORDER_DTL.ORD_SPRC + PO_ORDER_DTL.ORD_SVAT) * (CASE WHEN @P_OFFICIAL_WGHT > 0 THEN @P_OFFICIAL_WGHT ELSE @QTY END), 
+							UDATE = GETDATE(),
+							UEMP_ID = @P_UEMP_ID
+						WHERE ORD_NO = @C_ORD_NO AND SCAN_CODE = @C_SCAN_CODE
+
+					END
+																			
+					SELECT @LOT_NO = ISNULL(LOT_NO, '') FROM PO_ORDER_LOT WHERE ORD_NO = @P_ORD_NO AND SCAN_CODE = @C_SCAN_CODE
+													
+					IF @LOT_NO = ''
+					BEGIN						
+												
+						IF @ORD_GB = 2
+						BEGIN
+							--반품주문일 경우 생산일자 11111111
+							SET @DELIVERY_DEC_DT = '11111111'
+							SET @CFM_FLAG = 'Y'
+						END
+						ELSE 
+						BEGIN							
+							SET @DELIVERY_DEC_DT = ''
+							SET @CFM_FLAG = 'N'
+						END
+						
+						--BOX 제품일 경우 해당 단품 제품 스캔코드 적용
+						IF ISNULL(@BX_SCAN_CODE, '') != ''
+							SET @LOT_SCAN_CODE = @BX_SCAN_CODE
+
+						-- LOT 생성 함수
+						SET @LOT_NO_INFO = DBO.GET_WT_LOT_NO_CREATE(@LOT_SCAN_CODE, @VEN_CODE, @DELIVERY_DEC_DT, '');																
+
+						SET @LOT_NO = DBO.FN_GET_SPLIT(@LOT_NO_INFO,'|', 1)		--LOT 번호
+						SET @EXPIRY_DAY = DBO.FN_GET_SPLIT(@LOT_NO_INFO,'|', 2) --소비기한
+
+					END
+															
+					IF @LOT_NO != ''
+					BEGIN
+
+						IF @C_BOM_GB = '1'
+							SET @PROD_GB = 'B'
+						
+						IF @C_SET_GB = '1'
+							SET @PROD_GB = 'S'
+						
+						IF @C_WEIGHT_GB = 'WT'				
+							SET @PROD_GB = 'K'
+										
+						-- (CD_LOT_MST) 중량 제품 및 반품 제품일 경우 LOT 생성			
+						IF NOT EXISTS(SELECT LOT_NO FROM VIEW_CD_LOT_MST WHERE LOT_NO = @LOT_NO)
+							INSERT INTO CD_LOT_MST (PROD_DT, SCAN_CODE, PROD_GB, LOT_NO, EXPIRATION_DT, PROD_GB_CD, PROD_QTY, CFM_FLAG, IDATE, IEMP_ID) 
+								VALUES(FORMAT(GETDATE(), 'yyyyMMdd'), @C_SCAN_CODE, @PROD_GB, @LOT_NO, @EXPIRY_DAY, '', 0.00, @CFM_FLAG, GETDATE(), @P_UEMP_ID);										
+						-- //
+						
+						-- 시험 성적서는 반품 제품은 제외
+						IF @ORD_GB != 2
+						BEGIN
+							-- (PD_TEST_REPORT) 벌크제품 PDA에서 생성된 LOT로 시험 성적서 등록						
+							EXEC PR_WMS_TEST_REPORT_PUT @C_SCAN_CODE, @LOT_NO, @P_UEMP_ID, @RETURN_CODE OUT, @RETURN_MESSAGE OUT
+							-- //
+						END
+					
+						-- (PO_ORDER_LOT) 해당 주문건의 LOT 정보 업데이트
+						IF EXISTS(SELECT ORD_NO FROM PO_ORDER_LOT WHERE ORD_NO = @C_ORD_NO AND SCAN_CODE = @C_SCAN_CODE AND LOT_NO = @LOT_NO)
+							--UPDATE PO_ORDER_LOT SET PICKING_QTY = @QTY, UDATE = GETDATE(), UEMP_ID = @P_UEMP_ID WHERE ORD_NO = @C_ORD_NO AND LOT_NO = @LOT_NO
+							UPDATE PO_ORDER_LOT SET PICKING_QTY = (CASE WHEN @P_OFFICIAL_WGHT > 0 THEN @P_OFFICIAL_WGHT ELSE @QTY END), UDATE = GETDATE(), UEMP_ID = @P_UEMP_ID WHERE ORD_NO = @C_ORD_NO AND LOT_NO = @LOT_NO
+						ELSE
+							--INSERT INTO PO_ORDER_LOT (ORD_NO, SCAN_CODE, LOT_NO, PICKING_QTY, IDATE, IEMP_ID) 
+							--	VALUES (@C_ORD_NO, @C_SCAN_CODE, @LOT_NO, @QTY, GETDATE(), @P_UEMP_ID)												
+							INSERT INTO PO_ORDER_LOT (ORD_NO, SCAN_CODE, LOT_NO, PICKING_QTY, IDATE, IEMP_ID) 
+								VALUES (@C_ORD_NO, @C_SCAN_CODE, @LOT_NO, (CASE WHEN @P_OFFICIAL_WGHT > 0 THEN @P_OFFICIAL_WGHT ELSE @QTY END), GETDATE(), @P_UEMP_ID)												
+						-- //
+
+					END
+					
+				END
+							
+			END			
+			--*************************			
+			--***** 발주(입고) ********			
+			--*************************
+			ELSE IF @IO_GB = 1
+			BEGIN
+				IF @WEIGHT_GB = 'WT'
+				BEGIN
+					UPDATE PO_PURCHASE_DTL SET 
+					PUR_QTY = (CASE WHEN @P_OFFICIAL_WGHT > 0 THEN @P_OFFICIAL_WGHT ELSE @QTY END), 
+					PUR_WPRC = PO_PURCHASE_DTL.ORD_WPRC, 
+					PUR_WVAT = PO_PURCHASE_DTL.ORD_WVAT,
+					PUR_WAMT = (PO_PURCHASE_DTL.ORD_WPRC + PO_PURCHASE_DTL.ORD_WVAT) * (CASE WHEN @P_OFFICIAL_WGHT > 0 THEN @P_OFFICIAL_WGHT ELSE @QTY END), 
+					PUR_TOTAL_WPRC = PO_PURCHASE_DTL.ORD_WPRC * (CASE WHEN @P_OFFICIAL_WGHT > 0 THEN @P_OFFICIAL_WGHT ELSE @QTY END), 
+					UDATE = GETDATE(), 
+					UEMP_ID = @P_UEMP_ID
+				WHERE ORD_NO=@C_ORD_NO AND SCAN_CODE = @C_SCAN_CODE
+				END
+				ELSE
+				BEGIN
+					UPDATE PO_PURCHASE_DTL SET 
+					PUR_QTY = @QTY, 
+					PUR_WPRC = PO_PURCHASE_DTL.ORD_WPRC, 
+					PUR_WVAT = PO_PURCHASE_DTL.ORD_WVAT,
+					PUR_WAMT = (PO_PURCHASE_DTL.ORD_WPRC + PO_PURCHASE_DTL.ORD_WVAT) * (CASE WHEN @P_OFFICIAL_WGHT > 0 THEN @P_OFFICIAL_WGHT ELSE @QTY END), 
+					PUR_TOTAL_WPRC = PO_PURCHASE_DTL.ORD_WPRC * (CASE WHEN @P_OFFICIAL_WGHT > 0 THEN @P_OFFICIAL_WGHT ELSE @QTY END), 
+					UDATE = GETDATE(), 
+					UEMP_ID = @P_UEMP_ID
+				WHERE ORD_NO=@C_ORD_NO AND SCAN_CODE = @C_SCAN_CODE
+				END
+                                                                                                      
+			END
+
+			SET @C_QTY = '0'
+
+			FETCH NEXT FROM CURSOR_ORD_PRODUCT INTO @C_ORD_NO, @C_GUBUN, @C_SCAN_CODE, @C_WEIGHT_GB, @C_QTY, @C_LOT_NO, @C_BOM_GB, @C_SET_GB, @BX_SCAN_CODE
+		END
+		CLOSE CURSOR_ORD_PRODUCT
+		DEALLOCATE CURSOR_ORD_PRODUCT
+
+		--********************
+		-- HDR 피킹 금액 및 수중량 업데이트 
+		--********************		
+		IF @IO_GB = 2
+		BEGIN		
+		-- PO_ORDER_HDR UPDATE
+		UPDATE PO_ORDER_HDR SET 
+			ORD_STAT = (CASE WHEN @P_GROSS_WGHT > 0 AND @P_UNLOAD_WGHT > 0 AND @WEIGHT_GB = 'WT' THEN '33' ELSE PO_ORDER_HDR.ORD_STAT END),
+			PICKING_TOTAL_AMT = (SELECT SUM(ISNULL(PICKING_SAMT, 0)) FROM PO_ORDER_DTL WHERE ORD_NO = @P_ORD_NO),
+			PICKING_TOTAL_SPRC = (SELECT SUM(ISNULL(PICKING_SPRC, 0) * PICKING_QTY) FROM PO_ORDER_DTL WHERE ORD_NO = @P_ORD_NO),
+			UDATE = GETDATE(), 
+			UEMP_ID = @P_UEMP_ID
+		WHERE ORD_NO = @P_ORD_NO
+	
+		END
+		ELSE IF @IO_GB = 1
+		BEGIN
+		-- PO_PURCHASE_HDR UPDATE
+            UPDATE PO_PURCHASE_HDR SET 
+				PUR_STAT = (CASE WHEN @SUM_QTY > 0 THEN '33' ELSE PO_PURCHASE_HDR.PUR_STAT END),
+				PUR_TOTAL_AMT = (SELECT SUM(ISNULL(PUR_WAMT, 0)) FROM PO_PURCHASE_DTL WHERE ORD_NO = @P_ORD_NO),
+				PUR_TOTAL_WPRC = (SELECT SUM(ISNULL(PUR_WPRC, 0) * PUR_QTY) FROM PO_PURCHASE_DTL WHERE ORD_NO = @P_ORD_NO),
+				UDATE = GETDATE(), 
+				UEMP_ID = @P_UEMP_ID
+            WHERE ORD_NO = @P_ORD_NO
+
+		END
+		
+
+		--************************************
+		--***** 차량정보 업데이트 ************
+		--************************************
+		IF ISNULL(@P_CAR_NO, '') != '' 
+		BEGIN
+			
+			MERGE INTO PO_CAR_INFO AS CI
+			USING (SELECT @P_CAR_NO AS CAR_NO) AS SCI
+			ON (CI.CAR_NO = SCI.CAR_NO)
+			WHEN NOT MATCHED THEN
+    			INSERT (CAR_NO, CAR_GB, IDATE, IEMP_ID) VALUES (@P_CAR_NO, @P_CAR_GB, GETDATE(), @P_UEMP_ID);
+			;
+		END
+
+
+	COMMIT;
+
+	END TRY
+	
+	BEGIN CATCH		
+
+		IF @@TRANCOUNT > 0
+		BEGIN 
+			ROLLBACK TRAN
+
+			IF CURSOR_STATUS('global', 'CURSOR_ORD_PRODUCT') >= 0
+			BEGIN
+				CLOSE CURSOR_ORD_PRODUCT;
+				DEALLOCATE CURSOR_ORD_PRODUCT;
+			END
+		
+		SET @RETURN_CODE = -1
+		SET @RETURN_MESSAGE = ERROR_MESSAGE()
+		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()		-- 프로시저명
+			, ERROR_MESSAGE()			-- 에러메시지
+			, ERROR_LINE()				-- 에러라인
+			, GETDATE()	
+		END
+
+	END CATCH
+
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE, @ENTRANCE_YN AS ENTRANCE_YN
+END
+
+GO
+

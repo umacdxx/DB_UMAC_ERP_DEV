@@ -1,0 +1,23 @@
+/*
+-- 생성자 :	윤현빈
+-- 등록일 :	2024.05.08
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명	: 에러메세지 
+-- 실행문 : 
+*/
+CREATE FUNCTION [dbo].[GET_ERR_MSG](
+	@P_CD_ID NVARCHAR(30)
+)
+RETURNS NVARCHAR(2000)
+AS
+BEGIN
+	DECLARE @RESULT NVARCHAR(2000)
+
+	SET @RESULT = (SELECT CD_DESCRIPTION  FROM TBL_COMM_CD_MST WITH(NOLOCK) WHERE CD_CL = 'ERR_MSG' AND CD_ID = @P_CD_ID)
+	
+RETURN @RESULT
+END
+
+GO
+

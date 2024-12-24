@@ -1,0 +1,141 @@
+/*
+-- 생성자 :	윤현빈
+-- 등록일 :	2024.07.09
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 실사재고 확정
+-- 실행문 : EXEC PR_STOCK_AUDIT_CONFIRM '20240701', 'test'
+*/
+CREATE PROCEDURE [dbo].[PR_STOCK_AUDIT_CONFIRM]
+( 
+	@P_SURVEY_ID	NVARCHAR(50) = '',	-- SURVEY_ID
+	@P_EMP_ID	 	NVARCHAR(20) = ''		-- 세션 아이디
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	DECLARE @RETURN_CODE 	INT 			= 0		-- 리턴코드
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) 	= '' 	-- 리턴메시지
+
+	BEGIN TRAN
+	BEGIN TRY
+		
+		--IF EXISTS (
+		--	SELECT TOP 1 SURVEY_ID
+		--		FROM IV_SCHEDULER AS A
+		--	   WHERE SURVEY_ID LIKE SUBSTRING(@P_SURVEY_ID ,1,6) + '%'
+		--		 AND SURVEY_ID < @P_SURVEY_ID
+		--		 AND CFM_FLAG = 'N'
+		--	   ORDER BY SURVEY_ID DESC
+		--)
+		--BEGIN
+
+
+----------------------------------------
+-- 1. 확정 처리
+----------------------------------------
+			UPDATE IV_SCHEDULER 
+				SET CFM_FLAG = 'Y'
+				  , CFM_DT = CONVERT(VARCHAR, GETDATE(), 112)
+				  , CFM_EMP_ID = @P_EMP_ID
+				  , UDATE = GETDATE()
+				  , UEMP_ID = @P_EMP_ID
+			   WHERE SURVEY_ID = @P_SURVEY_ID
+				 AND CFM_FLAG = 'N'
+				;
+
+			UPDATE IV_STOCK_SURVEY
+				SET CFM_QTY = ISNULL(SURVEY_QTY_2, SURVEY_QTY_1)
+				  , UDATE = GETDATE()
+				  , UEMP_ID = @P_EMP_ID
+			   WHERE SURVEY_ID = @P_SURVEY_ID
+			;
+
+----------------------------------------
+-- 2. 실사재고_SUM 테이블 삽입
+----------------------------------------
+			WITH W_BOX_MST AS (
+				SELECT A.BOX_CODE
+					 , A.ITM_CODE
+					 , B.SCAN_CODE
+					 , A.IPSU_QTY
+					FROM CD_BOX_MST AS A
+					INNER JOIN CD_PRODUCT_CMN AS B ON A.ITM_CODE = B.ITM_CODE
+			)
+			INSERT INTO IV_STOCK_SURVEY_ADD
+			(
+				INV_DT
+			  , ITM_CODE
+			  , SCAN_CODE
+			  , SURVEY_ID
+			  , SURVEY_QTY_1
+			  , SURVEY_QTY_2
+			  , CFM_QTY
+			  , SURVEY_GB
+			  , IDATE
+			  , IEMP_ID
+			  , UDATE
+			  , UEMP_ID
+			)
+			SELECT A.INV_DT
+				 , ISNULL(W_BOX_MST.ITM_CODE, A.ITM_CODE) AS ITM_CODE
+				 , ISNULL(W_BOX_MST.SCAN_CODE, A.SCAN_CODE) AS SCAN_CODE
+				 , A.SURVEY_ID
+				 , CASE WHEN SUBSTRING(@P_SURVEY_ID, 7, 2) = '01' THEN SUM(ISNULL(B.INV_END_QTY, 0)) ELSE SUM(A.SURVEY_QTY_1 * ISNULL(W_BOX_MST.IPSU_QTY, 1)) END
+				 , SUM(A.SURVEY_QTY_2 * ISNULL(W_BOX_MST.IPSU_QTY, 1)) AS SURVEY_QTY_2
+				 , SUM(A.CFM_QTY * ISNULL(W_BOX_MST.IPSU_QTY, 1)) AS CFM_QTY
+				 , MAX(A.SURVEY_GB) AS SURVEY_GB
+				 , GETDATE()
+				 , 'PR_STOCK_AUDIT_CONF'
+				 , NULL
+				 , NULL
+				FROM IV_STOCK_SURVEY AS A
+				LEFT OUTER JOIN W_BOX_MST AS W_BOX_MST ON A.ITM_CODE = W_BOX_MST.BOX_CODE
+				LEFT OUTER JOIN IV_DT_ITEM_COLL AS B ON A.INV_DT = B.INV_DT AND A.ITM_CODE = ISNULL(W_BOX_MST.ITM_CODE, B.ITM_CODE)
+				WHERE A.SURVEY_ID = @P_SURVEY_ID
+			GROUP BY A.INV_DT, A.SURVEY_ID, ISNULL(W_BOX_MST.ITM_CODE, A.ITM_CODE), ISNULL(W_BOX_MST.SCAN_CODE, A.SCAN_CODE)
+
+			;
+			
+		--	SET @RETURN_CODE = -93; -- 확정 실패 (확정되지 않은 이전 조사ID가 있습니다.)
+		--	SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-93');
+
+		--END
+
+		--ELSE 
+		--BEGIN	
+			SET @RETURN_CODE = 91; -- 확정완료
+			SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('91');
+		--END
+
+		COMMIT;
+	
+	END TRY
+	
+	BEGIN CATCH		
+		IF @@TRANCOUNT > 0
+		BEGIN
+			ROLLBACK TRAN
+
+			--DROP TABLE IF EXISTS #TEMP_DATA;
+
+				--에러 로그 테이블 저장
+				INSERT INTO TBL_ERROR_LOG 
+				SELECT ERROR_PROCEDURE()	-- 프로시저명
+				, ERROR_MESSAGE()			-- 에러메시지
+				, ERROR_LINE()				-- 에러라인
+				, GETDATE();
+		
+				SET @RETURN_CODE = -1; -- 저장 실패
+				SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1');
+			
+		END
+			
+	END CATCH
+
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+
+END
+
+GO
+

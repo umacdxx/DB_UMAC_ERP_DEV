@@ -1,0 +1,131 @@
+/*
+
+-- 생성자 :	이동호
+-- 등록일 :	2024.04.03
+-- 수정자 : -
+-- 설 명  : 입출고예정조회 > 입출고 상세 리스트 
+-- 실행문 : 
+EXEC PR_WMS_SCALE_PRODUCT_LIST 2, '2240806002'
+
+*/
+CREATE PROCEDURE [dbo].[PR_WMS_SCALE_PRODUCT_LIST]
+( 
+	@P_IO_GB					INT = 0,			-- 입출고구분(출고: 2, 입고 : 1)
+	@P_ORD_NO					NVARCHAR(11) = ''	-- 주문(발주)번호	
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	BEGIN TRY 
+	
+	SELECT 
+		IO_GB,
+		A.GUBUN,
+		A.ORD_NO,																							--주문번호																
+		A.SCAN_CODE,																						--상품스캔코드
+		CMN.ITM_CODE,																						--상품코드		
+		CONCAT((CASE WHEN GUBUN = 'S' THEN '(샘플)' ELSE '' END), CMN.ITM_NAME) AS ITM_NAME,															--상품명
+		CONCAT((CASE WHEN GUBUN = 'S' THEN '(샘플)' ELSE '' END), CMN.ITM_NAME_DETAIL) AS ITM_NAME_DETAIL,												--제품명(상세)		
+		CMN.UNIT_CAPACITY AS CAPACITY,																		--표시 용량(규격)
+		CMN.WEIGHT_GB,																						--수중량구분
+		ISNULL(CMN.IPSU_QTY, 0) AS IPSU_QTY, 																--입수수량										
+		ISNULL(CMN.PLT_BOX_QTY, 0) AS PLT_BOX_QTY,															--PLT_박스수량
+		CMN.ITM_FORM,																						--상품형태
+		COM1.CD_NM AS CAPACITY_UNIT,																		--표시 용량(규격) 단위	
+		ISNULL(FORMAT(ROUND(CONVERT(FLOAT, CMN.UNIT_WEIGHT) / 1000, 2, 0),'####0.#0'), 0) AS UNIT_WEIGHT,	--상품무게(중량) 			
+		ORD_QTY,																							--주문/발주수량
+		CAST(ISNULL(A.QTY, 0) AS DECIMAL(15,2)) AS QTY,														--입출고수량						
+		(CASE WHEN CMN.WEIGHT_GB = 'QTY' THEN ISNULL(FORMAT(ROUND(CONVERT(FLOAT, FORMAT(ROUND(CONVERT(FLOAT, CMN.UNIT_WEIGHT) / 1000, 2, 0),'####0.#0')) * A.QTY, 2,0), '####0.#0'), 0) --입출고수/중량 : 수량일 경우 중량 * 입출고수량, 중량일 경우 입출고수량
+			  WHEN CMN.WEIGHT_GB = 'WT' THEN CAST(ISNULL(A.QTY,0) AS VARCHAR) END) AS UNIT_WEIGHT_TOTAL,
+		LOT.LOT_NO + (CASE  WHEN LOT.LOT_NO_CNT > 1 THEN ' 외' +  CAST(( LOT.LOT_NO_CNT - 1 ) AS NVARCHAR) + '개' ELSE '' END) AS LOT_NO,
+		ISNULL(LOT.LOT_NO_CNT, 0) AS LOT_NO_CNT,															--LOT 갯수			
+		LOT.LOT_NO_LIST																						--LOT 리스트
+		FROM (
+			SELECT 2 AS IO_GB, 'D' AS GUBUN, ORD_NO, SEQ, SCAN_CODE, ORD_QTY, PICKING_QTY AS QTY FROM PO_ORDER_DTL WHERE ORD_NO = @P_ORD_NO
+			UNION ALL 
+			SELECT 2 AS IO_GB, 'S' AS GUBUN, ORD_NO, SEQ, SCAN_CODE, ORD_QTY, PICKING_QTY AS QTY FROM PO_ORDER_SAMPLE WHERE ORD_NO = @P_ORD_NO
+			UNION ALL
+			SELECT 1 AS IO_GB, 'D' AS GUBUN, ORD_NO, SEQ, SCAN_CODE, ORD_QTY, PUR_QTY AS QTY FROM PO_PURCHASE_DTL WHERE ORD_NO = @P_ORD_NO
+		) A 
+			INNER JOIN CD_PRODUCT_CMN AS CMN ON A.SCAN_CODE = CMN.SCAN_CODE
+			LEFT OUTER JOIN PO_SCALE AS SCL ON A.ORD_NO = SCL.ORD_NO
+			LEFT OUTER JOIN TBL_COMM_CD_MST AS COM1 ON COM1.CD_CL='UNIT' AND CMN.UNIT = COM1.CD_ID
+			LEFT OUTER JOIN (
+					SELECT ORD_NO, SCAN_CODE, MAX(LOT_NO) AS LOT_NO, COUNT(1) AS LOT_NO_CNT 
+							, STUFF((SELECT ', ' + LOT_NO FROM PO_ORDER_LOT WHERE ORD_NO=LOT.ORD_NO AND SCAN_CODE = LOT.SCAN_CODE FOR XML PATH('')),1,2,'')  AS LOT_NO_LIST
+						FROM PO_ORDER_LOT AS LOT GROUP BY ORD_NO, SCAN_CODE
+			) AS LOT ON A.ORD_NO = LOT.ORD_NO AND A.SCAN_CODE = LOT.SCAN_CODE				
+			WHERE IO_GB = @P_IO_GB AND A.ORD_NO = @P_ORD_NO
+	UNION ALL 
+	SELECT 
+		'' AS IO_GB, 
+		'D' AS GUBUN, 
+		@P_ORD_NO AS ORD_NO,
+		SCAN_CODE,
+		ITM_CODE, 
+		ITM_NAME,
+		ITM_NAME_DETAIL, 
+		UNIT_CAPACITY AS CAPACITY, 
+		'QTY' AS WEIGHT_GB,																						
+		ISNULL(IPSU_QTY, 0) AS IPSU_QTY, 
+		ISNULL(PLT_BOX_QTY, 0) AS PLT_BOX_QTY, 	
+		'' AS ITM_FORM,
+		'' AS CAPACITY_UNIT,
+		ISNULL(FORMAT(ROUND(CONVERT(FLOAT, UNIT_WEIGHT) / 1000, 2, 0),'####0.#0'), 0) AS UNIT_WEIGHT,			--PLT무게(중량)
+		0 AS ORD_QTY,
+		QTY,																									--PLT수량
+		ISNULL(FORMAT(ROUND(CONVERT(FLOAT, FORMAT(ROUND(CONVERT(FLOAT, UNIT_WEIGHT) / 1000, 2, 0),'####0.#0')) * QTY, 2,0), '####0.#0'), 0) AS UNIT_WEIGHT_TOTAL,	--입출고중량 : PLT무게 *PLT수량
+		'' AS LOT_NO,
+		0 AS LOT_NO_CNT,
+		'' AS LOT_NO_LIST
+		--PLT_MODE
+	FROM dbo.FN_TBL_CD_PRODUCT_CMN_PLT(@P_ORD_NO) -- 주문 연동 PLT 상품 정보 출력
+	--UNION ALL
+	--SELECT 
+	--	'' AS IO_GB,
+	--	A.ORD_NO,																							--주문번호																
+	--	A.SCAN_CODE,																						--상품스캔코드
+	--	CMN.ITM_CODE,																						--상품코드
+	--	CONCAT('(샘플)',CMN.ITM_NAME) AS ITM_NAME,															--상품명
+	--	CONCAT('(샘플)',CMN.ITM_NAME_DETAIL) AS ITM_NAME_DETAIL,												--단축상품명
+	--	CMN.UNIT_CAPACITY AS CAPACITY,																		--표시 용량(규격)
+	--	CMN.WEIGHT_GB,																						--수중량구분
+	--	ISNULL(CMN.IPSU_QTY, 0) AS IPSU_QTY, 																--입수수량										
+	--	ISNULL(CMN.PLT_BOX_QTY, 0) AS PLT_BOX_QTY,															--PLT_박스수량
+	--	CMN.ITM_FORM,																						--상품형태
+	--	COM1.CD_NM AS CAPACITY_UNIT,																		--표시 용량(규격) 단위	
+	--	ISNULL(FORMAT(ROUND(CONVERT(FLOAT, CMN.UNIT_WEIGHT) / 1000, 2, 0),'####0.#0'), 0) AS UNIT_WEIGHT,	--상품무게(중량) 			
+	--	ORD_QTY,																							--주문/발주수량
+	--	CAST(ISNULL(A.PICKING_QTY, 0) AS DECIMAL(15,2)) AS QTY,																			--입출고수량						
+	--	(CASE WHEN CMN.WEIGHT_GB = 'QTY' THEN ISNULL(FORMAT(ROUND(CONVERT(FLOAT, FORMAT(ROUND(CONVERT(FLOAT, CMN.UNIT_WEIGHT) / 1000, 2, 0),'####0.#0')) * A.PICKING_QTY, 2,0), '####0.#0'), 0) --입출고수/중량 : 수량일 경우 중량 * 입출고수량, 중량일 경우 입출고수량
+	--		  WHEN CMN.WEIGHT_GB = 'WT' THEN CAST(ISNULL(A.PICKING_QTY,0) AS VARCHAR) END) AS UNIT_WEIGHT_TOTAL,
+	--	LOT.LOT_NO + (CASE  WHEN LOT.LOT_NO_CNT > 1 THEN ' 외' +  CAST(( LOT.LOT_NO_CNT - 1 ) AS VARCHAR) + '개' ELSE '' END) AS LOT_NO,
+	--	ISNULL(LOT.LOT_NO_CNT, 0) AS LOT_NO_CNT,															--LOT 갯수			
+	--	LOT.LOT_NO_LIST																					--LOT 리스트
+	--	FROM PO_ORDER_SAMPLE A 
+	--		INNER JOIN CD_PRODUCT_CMN AS CMN ON A.SCAN_CODE = CMN.SCAN_CODE
+	--		LEFT OUTER JOIN PO_SCALE AS SCL ON A.ORD_NO = SCL.ORD_NO
+	--		LEFT OUTER JOIN TBL_COMM_CD_MST AS COM1 ON COM1.CD_CL='UNIT' AND CMN.UNIT = COM1.CD_ID
+	--		LEFT OUTER JOIN (
+	--				SELECT ORD_NO, SCAN_CODE, MAX(LOT_NO) AS LOT_NO, COUNT(*) AS LOT_NO_CNT 
+	--						, STUFF((SELECT ', ' + LOT_NO FROM PO_ORDER_LOT WHERE ORD_NO=LOT.ORD_NO AND SCAN_CODE = LOT.SCAN_CODE FOR XML PATH('')),1,2,'')  AS LOT_NO_LIST
+	--					FROM PO_ORDER_LOT AS LOT GROUP BY ORD_NO, SCAN_CODE
+	--		) AS LOT ON A.ORD_NO = LOT.ORD_NO AND A.SCAN_CODE = LOT.SCAN_CODE				
+	--		WHERE A.ORD_NO = @P_ORD_NO
+
+	END TRY
+	
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+GO
+

@@ -1,0 +1,35 @@
+/*
+-- 생성자 :	이동호
+-- 등록일 :	2023.12.28
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  :  조직마스터 리스트 TREE JSON 형식 변환
+-- 실행문 : SELECT dbo.FN_DEPT_MST_TREE_JSON(0, NULL, 0);
+*/
+CREATE FUNCTION [dbo].[FN_DEPT_MST_TREE_JSON](
+	@P_PARENTID INT,					-- 뎁스 시작점
+	@P_PATH NVARCHAR(1000),				-- 뎁스 표시
+	@P_DEPTH INT						-- 뎁스 표시 시작 값
+)
+RETURNS nvarchar(max)
+AS BEGIN
+
+RETURN (	
+	SELECT		
+		T.DEPT_NAME,				
+		--T.UPPER_DEPT,
+		T.GRADE,
+		T.SORT_ORDER,
+		T.DEPT_CODE,
+		T.USE_YN,		
+		--PATHS = CONCAT(@P_PATH + ',', T.DEPT_CODE),
+		--DEPTH = @P_DEPTH + 1,
+		_children = JSON_QUERY(dbo.FN_DEPT_MST_TREE_JSON(T.DEPT_CODE, CONCAT(@P_PATH + ',', T.DEPT_CODE), @P_DEPTH + 1))
+	FROM TBL_DEPT_MST AS T WITH(NOLOCK) 
+	WHERE EXISTS (SELECT T.UPPER_DEPT INTERSECT SELECT @P_PARENTID) ORDER BY T.SORT_ORDER ASC
+	FOR JSON PATH
+);
+END;
+
+GO
+

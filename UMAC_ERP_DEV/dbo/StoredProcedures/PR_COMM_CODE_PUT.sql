@@ -1,0 +1,133 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2023.12.27
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 공통코드 저장
+-- 실행문 : EXEC PR_COMM_CODE_PUT '0000','TEST','TEST','','',1,'','','','','','','','','','','N',':0','admin','',''
+-- SELECT * FROM TBL_COMM_CD_MST
+*/
+CREATE PROCEDURE [dbo].[PR_COMM_CODE_PUT]
+	@P_CD_CL NVARCHAR(30),							-- 코드분류
+	@P_CD_ID NVARCHAR(30), 							-- 코드ID
+	@P_CD_NM NVARCHAR(100), 							-- 코드명
+	@P_CD_SHORT_NM NVARCHAR(20), 					-- 코드단축명
+	@P_CD_DESCRIPTION NVARCHAR(2000), 				-- 코드설명
+	@P_SORT_ORDER INT, 								-- 정렬순서
+	@P_MGMT_ENTRY_1 NVARCHAR(50), 				-- 관리항목1
+	@P_MGMT_ENTRY_DESCRIPTION_1 NVARCHAR(2000), -- 관리항목1 설명
+	@P_MGMT_ENTRY_2 NVARCHAR(50), 				-- 관리항목2
+	@P_MGMT_ENTRY_DESCRIPTION_2 NVARCHAR(2000), -- 관리항목2 설명
+	@P_MGMT_ENTRY_3 NVARCHAR(50), 				-- 관리항목3
+	@P_MGMT_ENTRY_DESCRIPTION_3 NVARCHAR(2000), -- 관리항목3 설명
+	@P_DEL_YN CHAR(1), 								-- 삭제여부
+	@P_EMP_IP NVARCHAR(50), 						-- IP
+	@P_EMP_ID NVARCHAR(20) 						-- 아이디
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	DECLARE @CODE_YN VARCHAR(1) = 'N'				-- 코드유무여부
+	DECLARE @SORT_ORDER INT = 0						-- 정렬순서
+	DECLARE @RETURN_CODE INT = 0			-- 리턴코드
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) = ''		-- 리턴메시지
+
+	BEGIN TRY 
+		 -- 해당 코드 있는지 확인
+		IF EXISTS (
+			SELECT 1 
+			  FROM TBL_COMM_CD_MST
+			 WHERE CD_CL = @P_CD_CL
+				AND CD_ID = @P_CD_ID
+		)
+		BEGIN
+			SET @CODE_YN = 'Y'
+		END
+
+		IF @CODE_YN = 'Y' 
+			BEGIN
+				UPDATE TBL_COMM_CD_MST
+					SET CD_NM = @P_CD_NM,
+						 CD_SHORT_NM = @P_CD_SHORT_NM,
+						 CD_DESCRIPTION = @P_CD_DESCRIPTION,
+						 MGMT_ENTRY_1 = @P_MGMT_ENTRY_1,
+						 MGMT_ENTRY_DESCRIPTION_1 = @P_MGMT_ENTRY_DESCRIPTION_1,
+						 MGMT_ENTRY_2 = @P_MGMT_ENTRY_2,
+						 MGMT_ENTRY_DESCRIPTION_2 = @P_MGMT_ENTRY_DESCRIPTION_2,
+						 MGMT_ENTRY_3 = @P_MGMT_ENTRY_3,
+						 MGMT_ENTRY_DESCRIPTION_3 = @P_MGMT_ENTRY_DESCRIPTION_3,
+						 SORT_ORDER = @P_SORT_ORDER,
+						 DEL_YN = @P_DEL_YN,
+						 UDATE = GETDATE(),
+						 UEMP_IP = @P_EMP_IP,
+						 UEMP_ID = @P_EMP_ID
+				 WHERE CD_CL = @P_CD_CL
+				   AND CD_ID = @P_CD_ID
+			END
+		ELSE
+			--순번구하기
+			BEGIN
+				SELECT @SORT_ORDER = ISNULL(MAX(SORT_ORDER),0) + 1
+					FROM TBL_COMM_CD_MST
+					WHERE CD_CL = @P_CD_CL AND CD_ID = @P_CD_ID
+			
+			INSERT INTO TBL_COMM_CD_MST(
+							CD_CL,
+							CD_ID,
+							CD_NM,
+							CD_SHORT_NM,
+							CD_DESCRIPTION,
+							SORT_ORDER,
+							MGMT_ENTRY_1,
+							MGMT_ENTRY_DESCRIPTION_1,
+							MGMT_ENTRY_2,
+							MGMT_ENTRY_DESCRIPTION_2,
+							MGMT_ENTRY_3,
+							MGMT_ENTRY_DESCRIPTION_3,
+							DEL_YN,
+							IDATE,
+							IEMP_IP,
+							IEMP_ID
+							) VALUES (
+							@P_CD_CL,
+							@P_CD_ID,
+							@P_CD_NM,
+							@P_CD_SHORT_NM,
+							@P_CD_DESCRIPTION,
+							@SORT_ORDER,
+							@P_MGMT_ENTRY_1,
+							@P_MGMT_ENTRY_DESCRIPTION_1,
+							@P_MGMT_ENTRY_2,
+							@P_MGMT_ENTRY_DESCRIPTION_2,
+							@P_MGMT_ENTRY_3,
+							@P_MGMT_ENTRY_DESCRIPTION_3,
+							@P_DEL_YN,
+							GETDATE(),
+							@P_EMP_IP,
+							@P_EMP_ID
+							)
+
+			END
+
+		SET @RETURN_CODE = 0 -- 저장완료
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('0')
+
+	END TRY
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+
+		SET @RETURN_CODE = -1 -- 저장실패
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1')
+	END CATCH
+	
+	
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+END
+
+GO
+

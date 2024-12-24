@@ -1,0 +1,13 @@
+CREATE PROCEDURE [dbo].[UMAC_CERT_CLOSE_KEY]
+AS
+BEGIN
+    BEGIN TRY
+        CLOSE SYMMETRIC KEY UMAC_CERT_KEY;
+    END TRY
+    BEGIN CATCH
+        -- Handle non-existant key here
+    END CATCH
+END
+
+GO
+

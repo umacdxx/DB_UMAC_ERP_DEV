@@ -1,0 +1,79 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.05.23
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 제비용항목 저장
+-- 실행문 : EXEC PR_IM_COST_ITM_PUT
+*/
+CREATE PROCEDURE [dbo].[PR_IM_COST_ITM_PUT] 
+	@P_COST_ITM_CODE	NVARCHAR(3),				-- 제비용항목코드
+	@P_COST_NAME		NVARCHAR(100),				-- 제비용명
+	@P_MODE				NVARCHAR(1)					-- I: 등록 U: 수정 D: 삭제
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	
+	DECLARE @SEQ			NVARCHAR(3)								-- 제비용항목코드 SEQ
+	DECLARE @RETURN_CODE	INT = 0									-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) = DBO.GET_ERR_MSG('0')		-- 리턴메시지
+
+	BEGIN TRY 
+	 
+		IF @P_MODE = 'I'
+			BEGIN
+				SELECT @SEQ = MAX(CONVERT(INT, SUBSTRING(COST_ITM_CODE, 2,2))) + 1 FROM IM_COST_ITM
+				IF LEN(@SEQ) = 1 
+					BEGIN
+						SET @SEQ = CONCAT('0', @SEQ)
+					END
+				ELSE IF LEN(@SEQ) = 2 
+					BEGIN
+						SET @SEQ = @SEQ
+					END
+				ELSE
+					BEGIN
+						SET @SEQ = '01'
+					END
+
+				SET @P_COST_ITM_CODE = CONCAT('W', @SEQ)
+
+				INSERT INTO IM_COST_ITM(
+							COST_ITM_CODE,
+							COST_NAME
+							) VALUES (
+							@P_COST_ITM_CODE,
+							@P_COST_NAME
+							)
+ 
+			END
+		ELSE IF @P_MODE = 'U'
+			BEGIN
+				UPDATE IM_COST_ITM
+					SET COST_NAME = @P_COST_NAME
+				  WHERE COST_ITM_CODE = @P_COST_ITM_CODE
+			END
+		ELSE
+			BEGIN
+				DELETE IM_COST_ITM
+					WHERE COST_ITM_CODE = @P_COST_ITM_CODE
+			END 
+			 
+	END TRY
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+
+		SET @RETURN_CODE = -1 -- 저장실패
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1')
+	END CATCH
+	
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+END
+
+GO
+

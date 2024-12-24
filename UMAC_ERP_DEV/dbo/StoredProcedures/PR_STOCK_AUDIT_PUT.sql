@@ -1,0 +1,243 @@
+
+/*
+
+-- 생성자 :	윤현빈
+-- 등록일 :	2024.07.08
+-- 설 명  : 재고실사등록
+-- 실행문 : 
+
+EXEC PR_STOCK_AUDIT_PUT '','','','',''
+
+*/
+CREATE PROCEDURE [dbo].[PR_STOCK_AUDIT_PUT]
+( 
+	@P_JSONDT			VARCHAR(8000) = '',
+	@P_SURVEY_ID		NVARCHAR(8) = '',
+	@P_INV_SURVEY_GB	NVARCHAR(1) = '',
+	@P_INV_DT			NVARCHAR(8) = '',
+	@P_EMP_ID			NVARCHAR(20)				-- 아이디
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	DECLARE @RETURN_CODE	INT = 0										-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE NVARCHAR(MAX) = DBO.GET_ERR_MSG('0')		-- 리턴메시지
+	
+	BEGIN TRAN
+	BEGIN TRY 
+		DECLARE @IS_LOT NVARCHAR(1) = 'Y';
+		DECLARE @V_INV_END_QTY INT;
+		DECLARE @MAX_SURVEY_ID NVARCHAR(8) = '';
+		DECLARE @V_INV_DT NVARCHAR(8) = '';
+
+		SELECT @V_INV_DT = INV_DT FROM IV_SCHEDULER WHERE SURVEY_ID = @P_SURVEY_ID;
+			
+		DECLARE @TMP_ITEM TABLE (
+			SCAN_CODE NVARCHAR(14),
+			LOT_NO NVARCHAR(30),
+			SURVEY_QTY INT,
+			INV_FLAG NVARCHAR(1),
+			MODE NVARCHAR(1)
+		)
+		
+		INSERT INTO @TMP_ITEM
+		SELECT SCAN_CODE, LOT_NO, SURVEY_QTY, INV_FLAG, MODE
+			FROM 
+				OPENJSON ( @P_JSONDT )   
+					WITH (    
+						SCAN_CODE NVARCHAR(14) '$.SCAN_CODE',
+						LOT_NO NVARCHAR(30) '$.LOT_NO',
+						SURVEY_QTY INT '$.SURVEY_QTY',
+						INV_FLAG NVARCHAR(1) '$.INV_FLAG',
+						MODE NVARCHAR(1) '$.MODE'
+					)
+				
+		DECLARE CURSOR_STOCK CURSOR FOR
+
+			SELECT B.ITM_CODE, A.SCAN_CODE, A.LOT_NO, A.SURVEY_QTY, A.INV_FLAG, MODE 
+				FROM @TMP_ITEM A
+				INNER JOIN CD_PRODUCT_CMN AS B ON A.SCAN_CODE = B.SCAN_CODE
+			
+		OPEN CURSOR_STOCK
+
+		DECLARE @P_ITM_CODE NVARCHAR(6),
+				@P_SCAN_CODE NVARCHAR(14),
+				@P_LOT_NO NVARCHAR(30),
+				@P_SURVEY_QTY INT,
+				@P_INV_FLAG NVARCHAR(1),
+				@P_MODE NVARCHAR(1)
+
+		FETCH NEXT FROM CURSOR_STOCK INTO @P_ITM_CODE, @P_SCAN_CODE, @P_LOT_NO, @P_SURVEY_QTY, @P_INV_FLAG, @P_MODE
+
+			WHILE(@@FETCH_STATUS=0)
+			BEGIN
+				IF @P_MODE = 'D'
+				BEGIN
+					DELETE FROM IV_STOCK_SURVEY
+						WHERE  SURVEY_ID = @P_SURVEY_ID AND SCAN_CODE = @P_SCAN_CODE AND LOT_NO = @P_LOT_NO AND INV_FLAG = @P_INV_FLAG
+					;
+				END
+
+				ELSE
+				BEGIN
+					SELECT @MAX_SURVEY_ID = MAX(SURVEY_ID)
+						FROM IV_SCHEDULER AS A
+					   WHERE A.CFM_FLAG = 'Y'
+						 AND A.INV_DT LIKE SUBSTRING(@P_SURVEY_ID, 1, 6) + '%'
+						 AND A.SURVEY_ID != @P_SURVEY_ID
+					;
+
+					IF @MAX_SURVEY_ID IS NOT NULL
+					BEGIN
+						SELECT @V_INV_END_QTY = MAX(A.SURVEY_QTY_2)
+							FROM IV_STOCK_SURVEY AS A
+						   WHERE A.INV_DT = @V_INV_DT
+						     AND A.SURVEY_ID = @MAX_SURVEY_ID
+						     AND A.ITM_CODE = @P_ITM_CODE
+						     AND A.LOT_NO = @P_LOT_NO
+						;
+					END
+
+					IF @MAX_SURVEY_ID IS NULL OR @V_INV_END_QTY IS NULL
+					BEGIN
+						SELECT @V_INV_END_QTY = ISNULL(MAX(A.INV_END_QTY), 0)
+							FROM IV_DT_ITEM_LOT_COLL AS A
+						   WHERE A.INV_DT = CONVERT(VARCHAR(8), DATEADD(DAY, -1, CONVERT(DATE, @V_INV_DT, 112)), 112)
+							 AND A.ITM_CODE = @P_ITM_CODE
+							 AND A.LOT_NO = @P_LOT_NO
+					END
+
+					-- LOT가 파라미터로 들어왔을 때 실제로 있는지 확인
+					IF @P_LOT_NO != '' AND @P_LOT_NO IS NOT NULL
+					BEGIN
+						IF NOT EXISTS (SELECT 1 FROM IV_LOT_STAT WHERE SCAN_CODE = @P_SCAN_CODE AND LOT_NO = @P_LOT_NO)
+						BEGIN
+							-- PDA는 없는 LOT라도 수정 가능, 이외의 제품은 LOT가 있어야 등록 가능
+							IF @P_INV_FLAG != 3 
+							SET @IS_LOT = 'N';
+						END
+
+						IF @IS_LOT = 'Y'
+						BEGIN
+							MERGE INTO IV_STOCK_SURVEY AS A
+								USING (SELECT 1 AS dual) AS B ON A.SURVEY_ID = @P_SURVEY_ID AND SCAN_CODE = @P_SCAN_CODE AND LOT_NO = @P_LOT_NO AND A.INV_FLAG = @P_INV_FLAG
+							WHEN MATCHED THEN
+								UPDATE SET
+									--A.SURVEY_QTY_1 = ISNULL(A.SURVEY_QTY_2,  A.SURVEY_QTY_1)
+								    A.SURVEY_QTY_2 = @P_SURVEY_QTY
+								  , A.UDATE = GETDATE()
+								  , A.UEMP_ID = @P_EMP_ID
+					
+							WHEN NOT MATCHED THEN
+								INSERT 
+								(
+									INV_DT
+								  , ITM_CODE
+								  , SCAN_CODE
+								  , SURVEY_ID
+								  , LOT_NO
+								  , SURVEY_QTY_1
+								  , SURVEY_QTY_2
+								  , SURVEY_GB
+								  , INV_FLAG
+								  , IDATE
+								  , IEMP_ID
+								)
+								VALUES
+								(
+									@V_INV_DT
+								  , @P_ITM_CODE
+								  , @P_SCAN_CODE
+								  , @P_SURVEY_ID
+								  , @P_LOT_NO
+								  , @V_INV_END_QTY
+								  , @P_SURVEY_QTY
+								  , @P_INV_SURVEY_GB
+								  , @P_INV_FLAG
+								  , GETDATE()
+								  , @P_EMP_ID
+								)
+							;
+						END
+					END
+
+					-- LOT가 파라미터로 없을 때 (화면에서 상품별 로트 유무 검사 하기 때문에 따로 조건 x)
+					ELSE
+					BEGIN
+						MERGE INTO IV_STOCK_SURVEY AS A
+							USING (SELECT 1 AS dual) AS B ON A.SURVEY_ID = @P_SURVEY_ID AND SCAN_CODE = @P_SCAN_CODE AND LOT_NO = @P_LOT_NO AND A.INV_FLAG = @P_INV_FLAG
+						WHEN MATCHED THEN
+							UPDATE SET
+								--A.SURVEY_QTY_1 = ISNULL(A.SURVEY_QTY_2,  A.SURVEY_QTY_1)
+								  A.SURVEY_QTY_2 = @P_SURVEY_QTY
+								, A.UDATE = GETDATE()
+								, A.UEMP_ID = @P_EMP_ID
+					
+						WHEN NOT MATCHED THEN
+							INSERT 
+							(
+								INV_DT
+								, ITM_CODE
+								, SCAN_CODE
+								, SURVEY_ID
+								, LOT_NO
+								, SURVEY_QTY_1
+								, SURVEY_QTY_2
+								, SURVEY_GB
+								, INV_FLAG
+								, IDATE
+								, IEMP_ID
+							)
+							VALUES
+							(
+								@V_INV_DT
+								, @P_ITM_CODE
+								, @P_SCAN_CODE
+								, @P_SURVEY_ID
+								, ''
+								, @V_INV_END_QTY
+								, @P_SURVEY_QTY
+								, @P_INV_SURVEY_GB
+								, @P_INV_FLAG
+								, GETDATE()
+								, @P_EMP_ID
+							)
+						;
+					END
+
+
+				END
+
+				FETCH NEXT FROM CURSOR_STOCK INTO @P_ITM_CODE, @P_SCAN_CODE, @P_LOT_NO, @P_SURVEY_QTY, @P_INV_FLAG, @P_MODE
+
+			END
+
+		CLOSE CURSOR_STOCK
+		DEALLOCATE CURSOR_STOCK
+
+	COMMIT;
+	END TRY
+	
+	BEGIN CATCH	
+		
+		IF @@TRANCOUNT > 0
+		BEGIN 
+			ROLLBACK TRAN
+			SET @RETURN_CODE = -1
+			SET @RETURN_MESSAGE = ERROR_MESSAGE()
+
+			--에러 로그 테이블 저장
+			INSERT INTO TBL_ERROR_LOG 
+			SELECT ERROR_PROCEDURE()		-- 프로시저명
+				, ERROR_MESSAGE()			-- 에러메시지
+				, ERROR_LINE()				-- 에러라인
+				, GETDATE()	
+		END 
+
+	END CATCH
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE 
+END
+
+GO
+

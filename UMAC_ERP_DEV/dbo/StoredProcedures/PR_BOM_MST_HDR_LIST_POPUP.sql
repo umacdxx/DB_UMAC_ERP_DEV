@@ -1,0 +1,43 @@
+/*
+-- 생성자 :	윤현빈
+-- 등록일 :	2024.04.03
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : BOM 마스터 HDR 리스트 출력(팝업)
+-- 실행문 : 
+EXEC PR_BOM_MST_HDR_LIST_POPUP '210001'
+*/
+CREATE PROCEDURE [dbo].[PR_BOM_MST_HDR_LIST_POPUP]
+( 
+	@P_SCAN_CODE	NVARCHAR(14) = ''   -- 상품코드
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	BEGIN TRY 
+		SELECT  ROW_NUMBER() OVER(ORDER BY A.BOM_CD ) AS ROW_NUM
+		     , A.BOM_CD 
+		     , A.BOM_NAME 
+		     , A.BOM_PROD_CD 
+		     , B.ITM_NAME_DETAIL AS BOM_PROD_NM 
+			FROM CD_BOM_HDR AS A
+				INNER JOIN CD_PRODUCT_CMN AS B 
+					ON A.BOM_PROD_CD = B.SCAN_CODE
+		   WHERE BOM_PROD_CD = @P_SCAN_CODE AND USE_YN = 'Y'
+				ORDER BY A.BOM_CD 
+	END TRY
+	
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+GO
+

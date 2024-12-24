@@ -1,0 +1,110 @@
+/*
+-- 생성자 :	윤현빈
+-- 등록일 :	2024.08.08
+-- 수정자 : 2024.11.20 강세미 - 소비기한 추가
+-- 설 명  : SET 생산 일정 등록
+-- 실행문 : EXEC PR_SET_PLAN_PUT '','',''
+*/
+CREATE PROCEDURE [dbo].[PR_SET_PLAN_PUT]
+( 
+	@P_SET_PLAN_SDATE		NVARCHAR(8) ,			-- 작업예정시작일
+	@P_SET_PLAN_EDATE		NVARCHAR(8) = '',		-- 작업예정종료일
+	@P_SET_PLAN_ID			NVARCHAR(14) = '',		-- 작업코드
+	@P_SET_PLAN_NM			NVARCHAR(100) = '',		-- 작업명
+	@P_EMP_ID	 			NVARCHAR(20) = ''		-- 등록자
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	DECLARE @RETURN_CODE 	INT 			= 0		-- 리턴코드
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) 	= '' 	-- 리턴메시지
+
+	BEGIN TRAN
+	BEGIN TRY
+		
+		DECLARE @V_CUR_YEAR_MON NVARCHAR(6);
+		DECLARE @V_LAST_ID NVARCHAR(11);
+		DECLARE @V_LAST_SEQ INT;
+		DECLARE @V_NEW_SEQ NVARCHAR(2);
+		DECLARE @V_NEW_ID NVARCHAR(11);
+
+		IF @P_SET_PLAN_ID = ''
+		BEGIN
+			SELECT @V_LAST_ID = MAX(SET_PLAN_ID) FROM PD_SET_PLAN_MST;
+
+			SET @V_CUR_YEAR_MON = CONVERT(NVARCHAR(6), GETDATE(), 112);
+			SET @V_LAST_SEQ = ISNULL(CAST(SUBSTRING(@V_LAST_ID, 10, 2) AS INT), 0);
+			SET @V_NEW_SEQ = RIGHT('00' + CAST(@V_LAST_SEQ + 1 AS NVARCHAR(2)), 2);
+			SET @V_NEW_ID = CONCAT('SET', @V_CUR_YEAR_MON, @V_NEW_SEQ)
+
+			INSERT INTO PD_SET_PLAN_MST
+			(
+				SET_PLAN_ID
+			  , SET_PLAN_NM
+			  , SET_PLAN_SDATE
+			  , SET_PLAN_EDATE
+			  , SET_STATUS
+			  , IDATE
+			  , IEMP_ID
+			  , UDATE
+			  , UEMP_ID
+			)
+			VALUES
+			(
+				@V_NEW_ID
+			  , @P_SET_PLAN_NM
+			  , @P_SET_PLAN_SDATE
+			  , @P_SET_PLAN_EDATE
+			  , '0'
+			  , GETDATE()
+			  , @P_EMP_ID
+			  , NULL
+			  , NULL
+			)
+
+		END
+
+		ELSE
+		BEGIN
+			UPDATE PD_SET_PLAN_MST
+				SET SET_PLAN_NM = @P_SET_PLAN_NM
+				  , SET_PLAN_SDATE = @P_SET_PLAN_SDATE
+				  , SET_PLAN_EDATE = @P_SET_PLAN_EDATE
+				  , UDATE = GETDATE()
+				  , UEMP_ID = @P_EMP_ID
+			   WHERE SET_PLAN_ID = @P_SET_PLAN_ID
+			     AND SET_STATUS IN ('0', '1') -- '계획 등록 전', '등록' 상태만 수정 가능
+				  
+		END
+
+		SET @RETURN_CODE = 0; -- 저장완료
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('0');
+		COMMIT;
+	END TRY
+	
+	BEGIN CATCH		
+		IF @@TRANCOUNT > 0
+		BEGIN
+			ROLLBACK TRAN
+
+			--에러 로그 테이블 저장
+			INSERT INTO TBL_ERROR_LOG 
+			SELECT ERROR_PROCEDURE()	-- 프로시저명
+			, ERROR_MESSAGE()			-- 에러메시지
+			, ERROR_LINE()				-- 에러라인
+			, GETDATE();
+		
+			SET @RETURN_CODE = -1; -- 저장 실패
+			SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1');
+			
+		END
+			
+	END CATCH
+
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+
+END
+
+GO
+

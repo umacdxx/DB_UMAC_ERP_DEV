@@ -1,0 +1,313 @@
+
+/*
+-- 생성자 :	윤현빈
+-- 등록일 :	2024.12.12
+-- 설 명  : 일반계좌입급처리 저장
+-- 실행문 : 
+
+EXEC PR_ACCT_DEPOSIT_MANAGE_PUT '',''
+
+*/
+CREATE PROCEDURE [dbo].[PR_ACCT_DEPOSIT_MANAGE_PUT]
+( 
+	--@P_JSONDT1			VARCHAR(8000) = '',		-- 입금등록 처리 파라미터
+	--@P_JSONDT2			VARCHAR(8000) = '',		-- 입금등록 처리 파라미터 (거래처 변경)
+	--@P_JSONDT3			VARCHAR(8000) = '',		-- 확정여부 처리 파라미터
+	--@P_EMP_ID			NVARCHAR(20)			-- 아이디
+
+	@P_JSONDT			VARCHAR(MAX) = '',		-- 입금등록 처리 JSON DATA
+	@P_EMP_ID			NVARCHAR(20)			-- 아이디
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	DECLARE @RETURN_CODE	INT = 0										-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE NVARCHAR(MAX) = DBO.GET_ERR_MSG('0')		-- 리턴메시지
+	
+	BEGIN TRAN
+	BEGIN TRY 
+	
+		DECLARE @JSONDT NVARCHAR(MAX) = ''
+
+		DECLARE @LIST TABLE (
+			MOID NVARCHAR(100),
+			DEPOSIT_DT NVARCHAR(11),
+			VEN_CODE NVARCHAR(7),
+			DEPOSIT_GB_NAME NVARCHAR(2),
+			DEPOSIT_AMT BIGINT,
+			DEPOSIT_NO NVARCHAR(11),
+			APP_NO NVARCHAR(18),
+			ISSUER_CODE NVARCHAR(5),
+			MODE NVARCHAR(1),
+			CMS_SEQ INT,
+			IDATE DATETIME
+		)
+
+		INSERT INTO @LIST
+		SELECT MOID, DEPOSIT_DT, VEN_CODE, '02' AS DEPOSIT_GB_NAME, DEPOSIT_AMT, DEPOSIT_NO, '' AS APP_NO, '' AS ISSUER_CODE, MODE, CMS_SEQ, GETDATE() AS IDATE
+			FROM 
+				OPENJSON ( @P_JSONDT )   
+					WITH ( 
+						MOID NVARCHAR(100)			'$.MOID',
+						DEPOSIT_DT NVARCHAR(8)		'$.ACCT_DT',
+						VEN_CODE NVARCHAR(7)		'$.VEN_CODE',
+						DEPOSIT_AMT BIGINT			'$.TX_AMT',
+						DEPOSIT_NO NVARCHAR(11)		'$.DEPOSIT_NO',
+						MODE NVARCHAR(1)			'$.MODE',
+						CMS_SEQ INT					'$.CMS_SEQ'
+					);
+
+		SET @JSONDT = (SELECT * FROM @LIST FOR JSON PATH)
+
+		DELETE FROM PA_ACCT_DEPOSIT_ORD 
+			FROM PA_ACCT_DEPOSIT_ORD AS A 
+			INNER JOIN (SELECT A.VEN_CODE, A.DEPOSIT_NO 
+						FROM PA_ACCT_DEPOSIT AS A 
+						INNER JOIN @LIST AS B ON A.MOID = B.MOID
+			) AS B ON A.VEN_CODE = B.VEN_CODE AND A.DEPOSIT_NO = B.DEPOSIT_NO
+		
+
+		--기존 MOID 거래 내역 삭제
+		DELETE FROM PA_ACCT_DEPOSIT FROM PA_ACCT_DEPOSIT AS A INNER JOIN @LIST AS B ON A.MOID = B.MOID
+
+		--CMS 일반계좌 입금 관리 MOID 초기화
+		UPDATE HCMS_ACCT_TRSC_PTCL SET MOID = '', CFM_DT = '', CFM_EMP_ID = '' FROM HCMS_ACCT_TRSC_PTCL AS A INNER JOIN @LIST AS B ON A.MOID = B.MOID
+
+		IF ISNULL(@JSONDT, '') != ''
+		BEGIN
+			EXEC PR_ACCT_DEPOSIT_MANUAL_PUT @JSONDT, @P_EMP_ID, @RETURN_CODE OUT, @RETURN_MESSAGE OUT;
+		END
+
+
+/*
+
+------------------------------------------------------------------------------------
+-- 1. 입금 데이터 생성
+------------------------------------------------------------------------------------
+		IF @P_JSONDT1 != ''
+		BEGIN
+			EXEC PR_ACCT_DEPOSIT_MANUAL_PUT @P_JSONDT1, @P_EMP_ID, @RETURN_CODE OUT, @RETURN_MESSAGE OUT;
+		END
+
+		SELECT @RETURN_CODE
+		SELECT @RETURN_MESSAGE
+
+
+
+------------------------------------------------------------------------------------
+-- 2. 입금 데이터 생성 (거래처 변경 시 )
+------------------------------------------------------------------------------------
+		IF @P_JSONDT2 != ''
+		BEGIN
+			DECLARE @TMP_ITEM1 TABLE (
+				MOID NVARCHAR(100),
+				DEPOSIT_DT NVARCHAR(11),
+				VEN_CODE NVARCHAR(7),
+				DEPOSIT_GB NVARCHAR(2),
+				DEPOSIT_AMT BIGINT,
+				DEPOSIT_NO NVARCHAR(11),
+				APP_NO NVARCHAR(18),
+				ISSUER_CODE NVARCHAR(5),
+				MODE NVARCHAR(1),
+				IDATE DATETIME
+			)
+			DECLARE @ORG_TMP_ITEM1 TABLE (
+				MOID NVARCHAR(100),
+				DEPOSIT_DT NVARCHAR(11),
+				VEN_CODE NVARCHAR(7),
+				DEPOSIT_GB NVARCHAR(2),
+				DEPOSIT_AMT BIGINT,
+				DEPOSIT_NO NVARCHAR(11),
+				APP_NO NVARCHAR(18),
+				ISSUER_CODE NVARCHAR(5),
+				MODE NVARCHAR(1),
+				IDATE DATETIME
+			)
+		
+			INSERT INTO @TMP_ITEM1
+			SELECT MOID, DEPOSIT_DT, VEN_CODE, DEPOSIT_GB, DEPOSIT_AMT, DEPOSIT_NO, APP_NO, ISSUER_CODE, MODE, IDATE
+				FROM 
+					OPENJSON ( @P_JSONDT2 )   
+						WITH (    
+							MOID NVARCHAR(100) '$.MOID',
+							DEPOSIT_DT NVARCHAR(11) '$.DEPOSIT_DT',
+							VEN_CODE NVARCHAR(7) '$.VEN_CODE',
+							DEPOSIT_GB NVARCHAR(2) '$.DEPOSIT_GB_NAME',
+							DEPOSIT_AMT BIGINT '$.DEPOSIT_AMT',
+							DEPOSIT_NO NVARCHAR(11) '$.DEPOSIT_NO',
+							APP_NO NVARCHAR(18) '$.APP_NO',
+							ISSUER_CODE NVARCHAR(5) '$.ISSUER_CODE',
+							MODE NVARCHAR(1) '$.MODE',
+							IDATE DATETIME '$.IDATE'
+						)
+			;
+		
+			INSERT INTO @ORG_TMP_ITEM1 SELECT * FROM @TMP_ITEM1; 
+		
+		------------------------------------------------------------------------------------
+		-- 2_1. 거래처 변경 시 기존 거래처 데이터 0 처리
+		------------------------------------------------------------------------------------
+			UPDATE A			
+				SET DEPOSIT_AMT = 0
+				  , A.VEN_CODE = B.VEN_CODE
+				FROM @ORG_TMP_ITEM1 AS A
+				INNER JOIN PA_ACCT_DEPOSIT AS B ON A.MOID = B.MOID
+			;
+
+			DECLARE @orgJsonData NVARCHAR(MAX);
+			SET @orgJsonData = (SELECT * FROM @ORG_TMP_ITEM1 FOR JSON PATH);
+			PRINT(@orgJsonData);
+			EXEC PR_ACCT_DEPOSIT_MANUAL_PUT @orgJsonData, @P_EMP_ID, @RETURN_CODE OUT, @RETURN_MESSAGE OUT;
+			
+
+			DECLARE CURSOR_DATA CURSOR FOR
+
+				SELECT A.MOID, A.DEPOSIT_DT, A.VEN_CODE, A.DEPOSIT_GB, A.DEPOSIT_AMT, A.DEPOSIT_NO, A.APP_NO, A.ISSUER_CODE, A.MODE, A.IDATE
+					FROM @ORG_TMP_ITEM1 A
+			
+			OPEN CURSOR_DATA
+
+			DECLARE @P_MOID1 NVARCHAR(100),
+					@P_DEPOSIT_DT1 NVARCHAR(11),
+					@P_VEN_CODE1 NVARCHAR(7),
+					@P_DEPOSIT_GB1 NVARCHAR(2),
+					@P_DEPOSIT_AMT1 BIGINT,
+					@P_DEPOSIT_NO1 NVARCHAR(11),
+					@P_APP_NO1 NVARCHAR(18),
+					@P_ISSUER_CODE1 NVARCHAR(5),
+					@P_MODE1 NVARCHAR(1),
+					@P_IDATE1 DATETIME
+
+			FETCH NEXT FROM CURSOR_DATA INTO @P_MOID1, @P_DEPOSIT_DT1, @P_VEN_CODE1, @P_DEPOSIT_GB1, @P_DEPOSIT_AMT1, @P_DEPOSIT_NO1, @P_APP_NO1, @P_ISSUER_CODE1, @P_MODE1, @P_IDATE1
+		
+				WHILE(@@FETCH_STATUS=0)
+				BEGIN
+				
+		------------------------------------------------------------------------------------
+		-- 2_2. 거래처 변경 시 기존 거래처 입금내역 삭제
+		------------------------------------------------------------------------------------
+					DELETE FROM PA_ACCT_DEPOSIT WHERE MOID = @P_MOID1;
+					DELETE FROM PA_ACCT_DEPOSIT_ORD WHERE MOID = @P_MOID1;
+
+					FETCH NEXT FROM CURSOR_DATA INTO @P_MOID1, @P_DEPOSIT_DT1, @P_VEN_CODE1, @P_DEPOSIT_GB1, @P_DEPOSIT_AMT1, @P_DEPOSIT_NO1, @P_APP_NO1, @P_ISSUER_CODE1, @P_MODE1, @P_IDATE1
+
+				END
+
+			CLOSE CURSOR_DATA
+			DEALLOCATE CURSOR_DATA
+		
+		------------------------------------------------------------------------------------
+		-- 2_3. 거래처 변경 시 새로운 거래처 처리
+		------------------------------------------------------------------------------------
+			EXEC PR_ACCT_DEPOSIT_MANUAL_PUT @P_JSONDT2, @P_EMP_ID, @RETURN_CODE OUT, @RETURN_MESSAGE OUT;
+		END;
+		
+------------------------------------------------------------------------------------
+-- 3. 입금 후 확정 처리
+------------------------------------------------------------------------------------
+		DECLARE @TMP_ITEM2 TABLE (
+			ACCT_NO NVARCHAR(20),
+			ACCT_DT NVARCHAR(8),
+			INST_DV_NO NVARCHAR(8),
+			CMSV_CUR_CD NVARCHAR(3),
+			CMSV_ACCT_TRSC_SEQ_NO DECIMAL(10,0),
+			VEN_CODE NVARCHAR(7),
+			MODE NVARCHAR(1),
+			MOID NVARCHAR(100)
+		)
+		
+		INSERT INTO @TMP_ITEM2
+		SELECT ACCT_NO, ACCT_DT, INST_DV_NO, CMSV_CUR_CD, CMSV_ACCT_TRSC_SEQ_NO, VEN_CODE, MODE, MOID
+			FROM 
+				OPENJSON ( @P_JSONDT3 )   
+					WITH (    
+						ACCT_NO NVARCHAR(20) '$.ACCT_NO',
+						ACCT_DT NVARCHAR(8) '$.ACCT_DT',
+						INST_DV_NO NVARCHAR(8) '$.INST_DV_NO',
+						CMSV_CUR_CD NVARCHAR(3) '$.CMSV_CUR_CD',
+						CMSV_ACCT_TRSC_SEQ_NO DECIMAL(10,0) '$.CMSV_ACCT_TRSC_SEQ_NO',
+						VEN_CODE NVARCHAR(7) '$.VEN_CODE',
+						MODE NVARCHAR(7) '$.MODE',
+						MOID NVARCHAR(100) '$.MOID'
+					)
+				
+		DECLARE CURSOR_CFM CURSOR FOR
+
+			SELECT A.ACCT_NO, A.ACCT_DT, A.INST_DV_NO, A.CMSV_CUR_CD, A.CMSV_ACCT_TRSC_SEQ_NO, A.VEN_CODE, A.MODE, A.MOID
+				FROM @TMP_ITEM2 A
+			
+		OPEN CURSOR_CFM
+
+		DECLARE @P_ACCT_NO NVARCHAR(20),
+				@P_ACCT_DT NVARCHAR(8),
+				@P_INST_DV_NO NVARCHAR(8),
+				@P_CMSV_CUR_CD NVARCHAR(3),
+				@P_CMSV_ACCT_TRSC_SEQ_NO	DECIMAL(10,0),
+				@P_VEN_CODE NVARCHAR(7),
+				@P_MODE NVARCHAR(1),
+				@P_MOID NVARCHAR(100)
+
+		FETCH NEXT FROM CURSOR_CFM INTO @P_ACCT_NO, @P_ACCT_DT, @P_INST_DV_NO, @P_CMSV_CUR_CD, @P_CMSV_ACCT_TRSC_SEQ_NO, @P_VEN_CODE, @P_MODE, @P_MOID
+		
+			WHILE(@@FETCH_STATUS=0)
+			BEGIN
+				MERGE INTO HCMS_ACCT_TRSC_PTCL AS A
+					USING (
+						SELECT *
+							FROM PA_ACCT_DEPOSIT
+							WHERE VEN_CODE = @P_VEN_CODE
+								AND DEPOSIT_GB = '02'
+								AND DEPOSIT_DT = @P_ACCT_DT
+					) AS B
+					ON ( A.INST_DV_NO = @P_INST_DV_NO
+						AND A.CMSV_CUR_CD = @P_CMSV_CUR_CD
+						AND A.CRYP_CMSV_ACCT_NO = @P_ACCT_NO
+						AND A.TRSC_DT = @P_ACCT_DT
+						AND A.CMSV_ACCT_TRSC_SEQ_NO = @P_CMSV_ACCT_TRSC_SEQ_NO
+						--AND 
+						--AND 
+						AND A.TX_AMT = B.DEPOSIT_AMT
+					)
+				WHEN MATCHED THEN
+					UPDATE SET
+						A.MOID = B.MOID
+						, A.CFM_DT = CONVERT(NVARCHAR, GETDATE(), 112)
+						, A.CFM_EMP_ID = @P_EMP_ID
+				;
+
+				FETCH NEXT FROM CURSOR_CFM INTO @P_ACCT_NO, @P_ACCT_DT, @P_INST_DV_NO, @P_CMSV_CUR_CD, @P_CMSV_ACCT_TRSC_SEQ_NO, @P_VEN_CODE, @P_MODE, @P_MOID
+
+			END
+
+		CLOSE CURSOR_CFM
+		DEALLOCATE CURSOR_CFM
+
+*/
+
+
+	COMMIT;
+	END TRY
+	
+	BEGIN CATCH	
+		
+		IF @@TRANCOUNT > 0
+		BEGIN 
+			ROLLBACK TRAN
+			SET @RETURN_CODE = -1
+			SET @RETURN_MESSAGE = ERROR_MESSAGE()
+
+			--에러 로그 테이블 저장
+			INSERT INTO TBL_ERROR_LOG 
+			SELECT ERROR_PROCEDURE()		-- 프로시저명
+				, ERROR_MESSAGE()			-- 에러메시지
+				, ERROR_LINE()				-- 에러라인
+				, GETDATE()	
+		END 
+
+	END CATCH
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE 
+END
+
+GO
+

@@ -1,0 +1,136 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.02.29
+-- 수정자 : 2024.07.31 강세미 - 입고예정일(DELIVERY_EXP_DT) 추가 
+-- 설 명  : 발주등록 HDR 저장 '', 
+-- 실행문 : EXEC PR_PURCHASE_HDR_PUT
+*/
+CREATE PROCEDURE [dbo].[PR_PURCHASE_HDR_PUT]
+	@P_ORD_NO			 NVARCHAR(11) = null,		-- 주문번호
+	@P_ORD_DT			 NVARCHAR(8), 				-- 거래처코드
+	@P_VEN_CODE			 NVARCHAR(7), 				-- 거래처코드
+	@P_REMARKS			 NVARCHAR(2000),			-- 비고
+	@P_TRANS_YN			 NVARCHAR(1),				-- 배차사용여부
+	@P_DELIVERY_CODE	 NVARCHAR(7) = null,		-- 배송지코드
+	@P_R_POST_NO		 NVARCHAR(5),				-- 우편번호
+	@P_R_ADDR			 NVARCHAR(100),				-- 주소
+	@P_R_ADDR_DTL		 NVARCHAR(50),				-- 상세주소
+	@P_PUR_STAT			 NVARCHAR(2),				-- 입고상태
+	@P_EMP_ID			 NVARCHAR(20), 				-- 아이디
+	@P_DELIVERY_EXP_DT	 NVARCHAR(20) 				-- 입고예정일
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	
+	DECLARE @NEW_NO NVARCHAR(8)										-- 신규번호
+	DECLARE @NEW_SEQ NVARCHAR(3)									-- 신규SEQ
+	DECLARE @DELIVERY_PRICE_SEQ INT									-- 운송비마스터SEQ
+	DECLARE @RETURN_CODE INT = 0									-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) = DBO.GET_ERR_MSG('0')		-- 리턴메시지
+
+	BEGIN TRY 
+		-- 상태 값 확인(검수완료 이후 수정 불가)
+		IF EXISTS (SELECT 1 FROM PO_PURCHASE_HDR WHERE ORD_NO = @P_ORD_NO AND PUR_STAT IN ('33', '35', '40'))
+		BEGIN
+			SET @RETURN_CODE = -1
+			SET @RETURN_MESSAGE = '검수완료 후 수정 불가합니다.';
+		END
+		ELSE
+		BEGIN
+
+			SET @P_PUR_STAT = ISNULL(@P_PUR_STAT, '')
+
+			IF @P_PUR_STAT = '' 
+				SET @P_PUR_STAT = '05'
+
+			-- 운송비SEQ
+			IF @P_DELIVERY_CODE != ''
+				SELECT @DELIVERY_PRICE_SEQ = A.SEQ 
+					FROM CD_DELIVERY_PRICE A
+					INNER JOIN CD_PARTNER_DELIVERY B ON A.SEQ = B.DELIVERY_PRICE_SEQ
+				WHERE B.VEN_CODE = @P_VEN_CODE AND B.DELIVERY_CODE = @P_DELIVERY_CODE
+
+			IF @P_ORD_NO = ''
+			BEGIN
+				-- INSERT
+				SELECT @NEW_NO = CONCAT('1', CONVERT(NVARCHAR(6), GETDATE(), 12))
+				SELECT @NEW_SEQ = ISNULL(MAX(RIGHT(ORD_NO,3)),'0') +1 FROM PO_PURCHASE_HDR WHERE (CONVERT(VARCHAR(8), IDATE, 112) = CONVERT(VARCHAR(8), GETDATE(), 112))
+				SET @NEW_SEQ = CASE WHEN LEN(@NEW_SEQ) = 1 THEN CONCAT('00',@NEW_SEQ)
+									WHEN LEN(@NEW_SEQ) = 2 THEN CONCAT('0',@NEW_SEQ)
+								ELSE @NEW_SEQ END
+				SET @P_ORD_NO = CONCAT(@NEW_NO, @NEW_SEQ)
+
+				INSERT INTO PO_PURCHASE_HDR(
+								ORD_NO,
+								ORD_DT,
+								VEN_CODE,
+								PUR_STAT,
+								PUR_CFM,
+								REMARKS,
+								TRANS_YN,
+								DELIVERY_CODE,
+								R_POST_NO,
+								R_ADDR,
+								R_ADDR_DTL,
+								IDATE,
+								IEMP_ID,
+								DELIVERY_PRICE_SEQ,
+								DELIVERY_EXP_DT
+								) VALUES (
+								@P_ORD_NO,
+								@P_ORD_DT,
+								@P_VEN_CODE,
+								@P_PUR_STAT,
+								'N',
+								@P_REMARKS,
+								@P_TRANS_YN,
+								@P_DELIVERY_CODE,
+								@P_R_POST_NO,
+								@P_R_ADDR,
+								@P_R_ADDR_DTL,
+								GETDATE(), 
+								@P_EMP_ID,
+								@DELIVERY_PRICE_SEQ,
+								@P_DELIVERY_EXP_DT
+								)
+			END
+			ELSE
+			BEGIN
+				-- UPDATE
+					UPDATE PO_PURCHASE_HDR
+						SET VEN_CODE = @P_VEN_CODE,
+							REMARKS = @P_REMARKS,
+							TRANS_YN = @P_TRANS_YN,
+							DELIVERY_CODE = @P_DELIVERY_CODE,
+							R_POST_NO = @P_R_POST_NO,
+							R_ADDR = @P_R_ADDR,
+							R_ADDR_DTL = @P_R_ADDR_DTL,
+							UDATE = GETDATE(), 
+							UEMP_ID = @P_EMP_ID,
+							DELIVERY_PRICE_SEQ = @DELIVERY_PRICE_SEQ,
+							DELIVERY_EXP_DT = @P_DELIVERY_EXP_DT
+					WHERE ORD_NO = @P_ORD_NO
+			END
+		END
+
+
+		 
+
+	END TRY
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+
+		SET @RETURN_CODE = -1 -- 저장실패
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1')
+	END CATCH
+	
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE, @P_ORD_NO AS ORD_NO 
+END
+
+GO
+

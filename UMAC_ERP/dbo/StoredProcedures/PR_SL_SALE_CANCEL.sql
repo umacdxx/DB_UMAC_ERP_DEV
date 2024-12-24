@@ -1,0 +1,128 @@
+
+/*
+
+-- 생성자 : 강세미
+-- 등록일 :	2024.06.17
+-- 수정자 : 2024.06.27 강세미- 매입 프로세스 추가
+			2024.09.10 강세미- 주문/발주상태 입출고확정 업데이트 처리 제거
+-- 설 명  : 매출입내역수정 > 확정취소
+-- 실행문 : 
+
+EXEC PR_SL_SALE_CANCEL '[{"ORD_NO":"2240715010"},{"ORD_NO":"2240715011"}]', 'admin'
+
+*/
+CREATE PROCEDURE [dbo].[PR_SL_SALE_CANCEL]
+( 
+	@P_JSONDT		VARCHAR(8000) = '',
+	@P_EMP_ID		VARCHAR(20)				-- 아이디
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	DECLARE @RETURN_CODE	INT = 0										-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE NVARCHAR(MAX) = DBO.GET_ERR_MSG('0')		-- 리턴메시지
+	
+	BEGIN TRAN
+	BEGIN TRY 				
+			
+		--#주문(출고) 매출 확정취소 처리
+		DECLARE @ORDER_TBL TABLE (
+			ORD_NO NVARCHAR(11)
+		)
+
+		INSERT INTO @ORDER_TBL
+			SELECT ORD_NO FROM 
+				OPENJSON ( @P_JSONDT )   
+					WITH (    
+						ORD_NO NVARCHAR(11) '$.ORD_NO'									
+					)
+			WHERE LEFT(ORD_NO, 1) = '2'
+		
+		IF EXISTS (SELECT 1 FROM @ORDER_TBL)
+		BEGIN
+			
+			MERGE SL_SALE AS A
+			USING (			
+				SELECT 
+					OT.ORD_NO
+				FROM @ORDER_TBL AS OT 
+			) AS B
+			ON (
+				A.ORD_NO  = B.ORD_NO
+			)		
+			WHEN MATCHED THEN
+				UPDATE SET SALE_CFM_DT = NULL,
+						   UDATE = GETDATE(),
+						   UEMP_ID = @P_EMP_ID
+			;		
+
+		END
+		
+
+		--#발주(입고) 매입 확정취소 처리--
+		DECLARE @PUR_ORDER_TBL TABLE (
+			ORD_NO NVARCHAR(11)
+		)
+
+		INSERT INTO @PUR_ORDER_TBL
+			SELECT ORD_NO FROM 
+				OPENJSON ( @P_JSONDT )   
+					WITH (    
+						ORD_NO NVARCHAR(11) '$.ORD_NO'									
+					)
+			WHERE LEFT(ORD_NO, 1) = '1'
+
+		IF EXISTS (SELECT 1 FROM @PUR_ORDER_TBL)
+		BEGIN
+			MERGE PUR_INFO AS A
+			USING (			
+				SELECT 
+					OT.ORD_NO
+				FROM @PUR_ORDER_TBL AS OT 
+			) AS B
+			ON (
+				A.ORD_NO  = B.ORD_NO
+			)		
+			WHEN MATCHED THEN
+				UPDATE SET PUR_CFM_DT = NULL,
+						   UDATE = GETDATE(),
+						   UEMP_ID = @P_EMP_ID
+			;		
+
+		END
+
+		--#취소된 주문번의 주문별 입금처리 내역에서 데이터 삭제			
+		DELETE PA_ACCT_DEPOSIT_ORD WHERE ORD_NO IN (SELECT ORD_NO FROM @ORDER_TBL)
+		--#
+		
+		SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+
+	COMMIT;
+	END TRY
+	
+	BEGIN CATCH	
+		
+		IF @@TRANCOUNT > 0
+		BEGIN 
+			ROLLBACK TRAN
+			SET @RETURN_CODE = -1
+			SET @RETURN_MESSAGE = ERROR_MESSAGE()
+
+			--에러 로그 테이블 저장
+			INSERT INTO TBL_ERROR_LOG 
+			SELECT ERROR_PROCEDURE()		-- 프로시저명
+				, ERROR_MESSAGE()			-- 에러메시지
+				, ERROR_LINE()				-- 에러라인
+				, GETDATE()	
+			
+		END 
+		
+		SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE 
+
+	END CATCH
+	
+END
+
+GO
+

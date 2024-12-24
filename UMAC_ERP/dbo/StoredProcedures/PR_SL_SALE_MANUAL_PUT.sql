@@ -1,0 +1,388 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.12.04
+-- 수정자 :  
+-- 설 명  : 수동 매출입완료 처리(가접수 OR 주문발주등록 -> 입출고완료)
+-- 실행문 : EXEC PR_SL_SALE_MANUAL_PUT [{"ORD_NO":"2241206004", "DELIVERY_DT":"20241206"}], 'admin'
+			EXEC PR_SL_SALE_MANUAL_PUT [{"ORD_NO":"1241206003", "DELIVERY_DT":"20241205"}], 'admin'
+*/
+CREATE PROCEDURE [dbo].[PR_SL_SALE_MANUAL_PUT]
+	@P_JSONDT VARCHAR(MAX) = '',
+	@P_EMP_ID NVARCHAR(20) 			-- 아이디
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	 
+	DECLARE @RETURN_CODE		INT = 0								-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE		NVARCHAR(10) = DBO.GET_ERR_MSG('0')	-- 리턴메시지
+	DECLARE @LOT_NO			NVARCHAR(30) = '',		--LOT 번호
+			@LOT_NO_INFO	NVARCHAR(50) = '',		--LOT 생성 함수 RETURN VALUE : {LOT 번호}|{소비기한}
+			@LOT_SCAN_CODE	NVARCHAR(14) = '',		--LOT 생성시 적용되는 스캔코드	
+			@BOM_GB			NVARCHAR(1) = '',		--LOT BOM구분
+			@SET_GB			NVARCHAR(1) = '',		--LOT SET구분
+			@PROD_GB		NVARCHAR(1) = '',		--생산구분(B:BOM, S:SET, K:벌크)
+			@PROD_GB_CD		NVARCHAR(3) = '',		--생산구분코드
+			@EXPIRY_DAY		NVARCHAR(8) = '',		--소비기한
+			@VEN_CODE		NVARCHAR(7) = '',		--거래처코드
+			@SALE_JSONDT	VARCHAR(MAX) = ''		--매출처리에 사용
+
+	BEGIN TRAN
+	BEGIN TRY 
+
+		-- 테이블변수 생성
+		DECLARE @ORD_NO_TBL TABLE (
+			ORD_NO NVARCHAR(11),
+			DELIVERY_DT NVARCHAR(8)
+		)
+
+		INSERT INTO @ORD_NO_TBL
+		SELECT ORD_NO, DELIVERY_DT
+		  FROM OPENJSON ( @P_JSONDT )   
+		  WITH ( 
+			ORD_NO NVARCHAR(11) '$.ORD_NO',
+			DELIVERY_DT NVARCHAR(8) '$.DELIVERY_DT'
+		  )
+
+		DECLARE CURSOR_ORD CURSOR FOR
+			SELECT 
+			ORD_NO,
+			DELIVERY_DT,
+			CASE WHEN LEFT(ORD_NO, 1) = '1' THEN '1' ELSE '2' END AS IO_GB
+			FROM @ORD_NO_TBL
+
+			-- CURSOR OPEN
+			OPEN CURSOR_ORD 
+				DECLARE @P_ORD_NO	NVARCHAR(11)
+				DECLARE @P_DELIVERY_DT	NVARCHAR(8)
+				DECLARE @P_IO_GB	VARCHAR(1)
+
+			FETCH NEXT FROM CURSOR_ORD INTO @P_ORD_NO, @P_DELIVERY_DT, @P_IO_GB
+
+			WHILE(@@FETCH_STATUS=0)
+			BEGIN
+				----------------------------
+				-- 출고
+				----------------------------
+				IF(@P_IO_GB = '2')
+				BEGIN
+					----------------------------
+					-- 1. 주문 DTL 테이블 수정
+					----------------------------
+					UPDATE PO_ORDER_DTL 
+					   SET PICKING_QTY = ORD_QTY 
+						 , PICKING_SPRC = ORD_SPRC
+						 , PICKING_SVAT = ORD_SVAT
+						 , PICKING_SAMT = ORD_QTY * (ORD_SPRC + ORD_SVAT)
+						 , UDATE = GETDATE()
+						 , UEMP_ID = @P_EMP_ID
+					 WHERE ORD_NO = @P_ORD_NO
+					;
+
+					----------------------------
+					-- 2. 주문 HDR 테이블 수정
+					----------------------------
+					WITH ORD_DATA AS (
+						SELECT SUM(DTL.PICKING_SPRC * DTL.PICKING_QTY) AS PICKING_TOTAL_SPRC
+							 , SUM(DTL.PICKING_SAMT) AS PICKING_TOTAL_AMT
+							 , DTL.ORD_NO
+						  FROM PO_ORDER_DTL AS DTL
+							INNER JOIN PO_ORDER_HDR AS HDR ON DTL.ORD_NO = HDR.ORD_NO
+						 WHERE DTL.ORD_NO = @P_ORD_NO
+							GROUP BY DTL.ORD_NO
+					)
+					UPDATE HDR
+					   SET PICKING_TOTAL_SPRC = ORD_DATA.PICKING_TOTAL_SPRC
+						 , PICKING_TOTAL_AMT = ORD_DATA.PICKING_TOTAL_AMT
+						 , DELIVERY_DEC_DT = @P_DELIVERY_DT
+						 , CLOSE_DT = @P_DELIVERY_DT
+						 , ORD_STAT = '35'
+						 , ORD_CFM = 'Y'
+						 , ORD_CFM_DT = @P_DELIVERY_DT
+						 , UDATE = GETDATE()
+						 , UEMP_ID = @P_EMP_ID
+					  FROM PO_ORDER_HDR AS HDR
+						INNER JOIN ORD_DATA ON HDR.ORD_NO = ORD_DATA.ORD_NO
+					;
+
+					----------------------------
+					-- 3. 주문 LOT 데이터 생성
+					----------------------------
+					SELECT @VEN_CODE = VEN_CODE FROM PO_ORDER_HDR WHERE ORD_NO = @P_ORD_NO
+					DECLARE CURSOR_MANUAL_ORD_PRODUCT CURSOR FOR			
+					SELECT A.ORD_NO, A.SCAN_CODE, B.WEIGHT_GB, A.PICKING_QTY, B.BOM_GB, B.SET_GB, D.BOM_GB, D.SET_GB, D.SCAN_CODE AS BX_SCAN_CODE
+					  FROM PO_ORDER_DTL AS A
+						INNER JOIN CD_PRODUCT_CMN AS B 
+							ON A.SCAN_CODE = B.SCAN_CODE
+						LEFT OUTER JOIN CD_BOX_MST AS C
+							ON B.ITM_CODE  = C.BOX_CODE
+						LEFT OUTER JOIN CD_PRODUCT_CMN AS D 
+							ON C.ITM_CODE  = D.ITM_CODE
+					 WHERE A.ORD_NO = @P_ORD_NO
+					
+					OPEN CURSOR_MANUAL_ORD_PRODUCT
+
+					DECLARE @O_ORD_NO NVARCHAR(11),
+							@O_SCAN_CODE NVARCHAR(14),
+							@O_WEIGHT_GB NVARCHAR(3),
+							@O_QTY NUMERIC(15,2),
+							@O_BOM_GB NVARCHAR(1),
+							@O_SET_GB NVARCHAR(1),
+							@O_BX_BOM_GB NVARCHAR(1),
+							@O_BX_SET_GB NVARCHAR(1),
+							@O_BX_SCAN_CODE NVARCHAR(14)	--BOX제품의 단품 스캔코드
+							
+					FETCH NEXT FROM CURSOR_MANUAL_ORD_PRODUCT INTO @O_ORD_NO, @O_SCAN_CODE, @O_WEIGHT_GB, @O_QTY, @O_BOM_GB, @O_SET_GB, @O_BX_BOM_GB, @O_BX_SET_GB, @O_BX_SCAN_CODE
+					WHILE(@@FETCH_STATUS=0)
+					BEGIN
+						SET @PROD_GB = '';
+						SET @PROD_GB_CD = '';
+						SET @BOM_GB = @O_BOM_GB
+						SET @SET_GB = @O_SET_GB
+						SET @LOT_NO = ''
+						SET @LOT_NO_INFO = ''
+						SET @LOT_SCAN_CODE = @O_SCAN_CODE
+				
+						--BOX 제품일 경우 해당 단품 제품 데이터 적용
+						IF ISNULL(@O_BX_SCAN_CODE, '') != ''
+						BEGIN
+							SET @LOT_SCAN_CODE = @O_BX_SCAN_CODE
+							SET @BOM_GB = @O_BX_BOM_GB
+							SET @SET_GB = @O_BX_SET_GB
+						END
+
+						IF @BOM_GB = '1'
+							SET @PROD_GB = 'B'
+						
+						IF @SET_GB = '1'
+							SET @PROD_GB = 'S'
+						
+						IF @O_WEIGHT_GB = 'WT'				
+							SET @PROD_GB = 'K'
+
+						IF(@PROD_GB = 'B')
+							SELECT @PROD_GB_CD = BOM_CD FROM CD_BOM_HDR WHERE BOM_PROD_CD = @LOT_SCAN_CODE
+
+						IF(@PROD_GB = 'S')
+							SELECT @PROD_GB_CD = SET_CD FROM CD_SET_HDR WHERE SET_PROD_CD = @LOT_SCAN_CODE
+
+						-- LOT 생성 함수
+						SET @LOT_NO_INFO = DBO.GET_WT_LOT_NO_CREATE(@LOT_SCAN_CODE, @VEN_CODE, @P_DELIVERY_DT, '');
+						SET @LOT_NO = DBO.FN_GET_SPLIT(@LOT_NO_INFO,'|', 1)		--LOT 번호
+						SET @LOT_NO = STUFF(@LOT_NO, 1, 8, '11111111');
+						SET @EXPIRY_DAY = DBO.FN_GET_SPLIT(@LOT_NO_INFO,'|', 2) --소비기한
+				
+						-- LOT 마스터 데이터 생성
+						IF NOT EXISTS(SELECT 1 FROM CD_LOT_MST WHERE LOT_NO = @LOT_NO)
+						BEGIN
+							INSERT INTO CD_LOT_MST (PROD_DT, SCAN_CODE, PROD_GB, LOT_NO, EXPIRATION_DT, PROD_GB_CD, PROD_QTY, CFM_FLAG, IDATE, IEMP_ID) 
+								VALUES(@P_DELIVERY_DT, @O_SCAN_CODE, @PROD_GB, @LOT_NO, @EXPIRY_DAY, @PROD_GB_CD, 0.00, 'Y', GETDATE(), @P_EMP_ID);
+						END 
+
+						-- 해당 주문건의 LOT 정보 생성								
+						INSERT INTO PO_ORDER_LOT (ORD_NO, SCAN_CODE, LOT_NO, PICKING_QTY, IDATE, IEMP_ID) 
+							VALUES (@O_ORD_NO, @O_SCAN_CODE, @LOT_NO, @O_QTY, GETDATE(), @P_EMP_ID)	
+
+						----------------------------
+						-- 4. 재고처리
+						----------------------------
+						SET @O_QTY = @O_QTY * (-1)
+						EXEC PR_IV_PRODUCT_STAT_HDR_PUT @LOT_SCAN_CODE, @O_QTY, 'PR_SL_SALE_MANUAL_PUT', 0, @LOT_NO, @O_ORD_NO, @O_BX_SCAN_CODE, @RETURN_CODE OUT, @RETURN_MESSAGE OUT
+
+						FETCH NEXT FROM CURSOR_MANUAL_ORD_PRODUCT INTO @O_ORD_NO, @O_SCAN_CODE, @O_WEIGHT_GB, @O_QTY, @O_BOM_GB, @O_SET_GB, @O_BX_BOM_GB, @O_BX_SET_GB, @O_BX_SCAN_CODE
+					END
+					CLOSE CURSOR_MANUAL_ORD_PRODUCT
+					DEALLOCATE CURSOR_MANUAL_ORD_PRODUCT
+
+				END
+				----------------------------
+				-- 입고
+				----------------------------
+				ELSE
+				BEGIN
+					----------------------------
+					-- 1. 입고 DTL 테이블 수정
+					----------------------------
+					UPDATE PO_PURCHASE_DTL 
+					   SET PUR_QTY = ORD_QTY 
+						 , PUR_WPRC = ORD_WPRC
+						 , PUR_WVAT = ORD_WVAT
+						 , PUR_TOTAL_WPRC = ORD_TOTAL_WPRC
+						 , PUR_WAMT = ORD_QTY * (ORD_WPRC + ORD_WVAT)
+						 , UDATE = GETDATE()
+						 , UEMP_ID = @P_EMP_ID
+					 WHERE ORD_NO = @P_ORD_NO
+					;
+					
+					----------------------------
+					-- 2. 입고 HDR 테이블 수정
+					----------------------------
+					WITH PUR_DATA AS (
+						SELECT SUM(DTL.PUR_WPRC * DTL.PUR_QTY) AS PUR_TOTAL_WPRC
+							 , SUM(DTL.PUR_WAMT) AS PUR_TOTAL_AMT
+							 , DTL.ORD_NO
+						  FROM PO_PURCHASE_DTL AS DTL
+							INNER JOIN PO_PURCHASE_HDR AS HDR ON DTL.ORD_NO = HDR.ORD_NO
+						 WHERE DTL.ORD_NO = @P_ORD_NO
+							GROUP BY DTL.ORD_NO
+					)
+					UPDATE HDR
+					   SET PUR_TOTAL_WPRC = PUR_DATA.PUR_TOTAL_WPRC
+						 , PUR_TOTAL_AMT = PUR_DATA.PUR_TOTAL_AMT
+						 , DELIVERY_IN_DT = @P_DELIVERY_DT
+						 , CLOSE_DT = @P_DELIVERY_DT
+						 , PUR_STAT = '35'
+						 , PUR_CFM = 'Y'
+						 , PUR_CFM_DT = @P_DELIVERY_DT
+						 , UDATE = GETDATE()
+						 , UEMP_ID = @P_EMP_ID
+					  FROM PO_PURCHASE_HDR AS HDR
+						INNER JOIN PUR_DATA ON HDR.ORD_NO = PUR_DATA.ORD_NO
+					;
+
+					----------------------------
+					-- 3. 입고 LOT 데이터 생성
+					----------------------------
+					SELECT @VEN_CODE = VEN_CODE FROM PO_PURCHASE_HDR WHERE ORD_NO = @P_ORD_NO
+
+					DECLARE CURSOR_MANUAL_PUR_PRODUCT CURSOR FOR			
+			
+					SELECT A.ORD_NO, A.SCAN_CODE, B.WEIGHT_GB, A.PUR_QTY, B.BOM_GB, B.SET_GB, D.BOM_GB, D.SET_GB, D.SCAN_CODE AS BX_SCAN_CODE
+					  FROM PO_PURCHASE_DTL AS A
+						INNER JOIN CD_PRODUCT_CMN AS B 
+							ON A.SCAN_CODE = B.SCAN_CODE
+						LEFT OUTER JOIN CD_BOX_MST AS C
+							ON B.ITM_CODE  = C.BOX_CODE
+						LEFT OUTER JOIN CD_PRODUCT_CMN AS D 
+							ON C.ITM_CODE  = D.ITM_CODE
+					 WHERE A.ORD_NO = @P_ORD_NO
+					
+					OPEN CURSOR_MANUAL_PUR_PRODUCT
+
+					DECLARE @C_ORD_NO NVARCHAR(11),
+							@C_SCAN_CODE NVARCHAR(14),
+							@C_WEIGHT_GB NVARCHAR(3),
+							@C_QTY NUMERIC(15,2),
+							@C_BOM_GB NVARCHAR(1),
+							@C_SET_GB NVARCHAR(1),
+							@BX_BOM_GB NVARCHAR(1),
+							@BX_SET_GB NVARCHAR(1),
+							@BX_SCAN_CODE NVARCHAR(14)	--BOX제품의 단품 스캔코드
+							
+					FETCH NEXT FROM CURSOR_MANUAL_PUR_PRODUCT INTO @C_ORD_NO, @C_SCAN_CODE, @C_WEIGHT_GB, @C_QTY, @C_BOM_GB, @C_SET_GB, @BX_BOM_GB, @BX_SET_GB, @BX_SCAN_CODE
+					WHILE(@@FETCH_STATUS=0)
+					BEGIN
+						SET @PROD_GB = '';
+						SET @PROD_GB_CD = '';
+						SET @BOM_GB = @C_BOM_GB
+						SET @SET_GB = @C_SET_GB
+						SET @LOT_NO = ''
+						SET @LOT_NO_INFO = ''
+						SET @LOT_SCAN_CODE = @C_SCAN_CODE
+
+						--BOX 제품일 경우 해당 단품 제품 데이터 적용
+						IF ISNULL(@BX_SCAN_CODE, '') != ''
+						BEGIN
+							SET @LOT_SCAN_CODE = @BX_SCAN_CODE
+							SET @BOM_GB = @BX_BOM_GB
+							SET @SET_GB = @BX_SET_GB
+						END
+
+						IF @BOM_GB = '1'
+							SET @PROD_GB = 'B'
+						
+						IF @SET_GB = '1'
+							SET @PROD_GB = 'S'
+						
+						IF @C_WEIGHT_GB = 'WT'				
+							SET @PROD_GB = 'K'
+
+						IF(@PROD_GB = 'B')
+							SELECT @PROD_GB_CD = BOM_CD FROM CD_BOM_HDR WHERE BOM_PROD_CD = @LOT_SCAN_CODE
+
+						IF(@PROD_GB = 'S')
+							SELECT @PROD_GB_CD = SET_CD FROM CD_SET_HDR WHERE SET_PROD_CD = @LOT_SCAN_CODE
+
+						-- LOT 생성 함수
+						SET @LOT_NO_INFO = DBO.GET_WT_LOT_NO_CREATE(@LOT_SCAN_CODE, @VEN_CODE, @P_DELIVERY_DT, '');
+						SET @LOT_NO = DBO.FN_GET_SPLIT(@LOT_NO_INFO,'|', 1)		--LOT 번호
+						SET @LOT_NO = STUFF(@LOT_NO, 1, 8, '11111111');
+						SET @EXPIRY_DAY = DBO.FN_GET_SPLIT(@LOT_NO_INFO,'|', 2) --소비기한
+				
+						PRINT(@LOT_NO)
+
+						-- LOT 마스터 데이터 생성
+						IF NOT EXISTS(SELECT 1 FROM CD_LOT_MST WHERE LOT_NO = @LOT_NO)
+						BEGIN
+							INSERT INTO CD_LOT_MST (PROD_DT, SCAN_CODE, PROD_GB, LOT_NO, EXPIRATION_DT, PROD_GB_CD, PROD_QTY, CFM_FLAG, IDATE, IEMP_ID) 
+								VALUES(@P_DELIVERY_DT, @C_SCAN_CODE, @PROD_GB, @LOT_NO, @EXPIRY_DAY, '', 0.00, 'Y', GETDATE(), @P_EMP_ID);
+						END 
+
+						----------------------------
+						-- 4. 재고처리
+						----------------------------
+						EXEC PR_IV_PRODUCT_STAT_HDR_PUT @LOT_SCAN_CODE, @C_QTY, 'PR_SL_SALE_MANUAL_PUT', 0, @LOT_NO, @C_ORD_NO, @BX_SCAN_CODE, @RETURN_CODE OUT, @RETURN_MESSAGE OUT
+
+						FETCH NEXT FROM CURSOR_MANUAL_PUR_PRODUCT INTO @C_ORD_NO, @C_SCAN_CODE, @C_WEIGHT_GB, @C_QTY, @C_BOM_GB, @C_SET_GB, @BX_BOM_GB, @BX_SET_GB, @BX_SCAN_CODE
+					END
+					CLOSE CURSOR_MANUAL_PUR_PRODUCT
+					DEALLOCATE CURSOR_MANUAL_PUR_PRODUCT
+				END
+
+				FETCH NEXT FROM CURSOR_ORD INTO @P_ORD_NO, @P_DELIVERY_DT, @P_IO_GB
+
+			END
+			
+			----------------------------
+			-- 5. 유종별, 제품별 출고량, 매출 집계
+			----------------------------
+			EXEC PR_AGGR_OIL_ITM_SALE_PUT @P_ORD_NO, @RETURN_CODE OUT, @RETURN_MESSAGE OUT
+
+		CLOSE CURSOR_ORD
+		DEALLOCATE CURSOR_ORD
+		
+		----------------------------
+		-- 6. 매출생성
+		----------------------------
+		EXEC PR_SL_SALE_PUT @P_JSONDT, @P_EMP_ID
+
+		COMMIT
+			
+	END TRY
+	BEGIN CATCH		
+		
+
+		IF @@TRANCOUNT > 0
+		BEGIN 
+			ROLLBACK TRAN
+			
+			IF CURSOR_STATUS('global', 'CURSOR_MANUAL_ORD_PRODUCT') >= 0
+			BEGIN
+				CLOSE CURSOR_MANUAL_ORD_PRODUCT;
+				DEALLOCATE CURSOR_MANUAL_ORD_PRODUCT;
+			END
+
+			IF CURSOR_STATUS('global', 'CURSOR_MANUAL_PUR_PRODUCT') >= 0
+			BEGIN
+				CLOSE CURSOR_MANUAL_PUR_PRODUCT;
+				DEALLOCATE CURSOR_MANUAL_PUR_PRODUCT;
+			END
+
+			--에러 로그 테이블 저장
+			INSERT INTO TBL_ERROR_LOG 
+			SELECT ERROR_PROCEDURE()	-- 프로시저명
+			, ERROR_MESSAGE()			-- 에러메시지
+			, ERROR_LINE()				-- 에러라인
+			, GETDATE()	
+
+			SET @RETURN_CODE = -1 -- 저장실패
+			SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1')
+
+		END 
+
+	END CATCH
+	
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+END
+
+GO
+

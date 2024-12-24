@@ -1,0 +1,47 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.05.16
+-- 설 명  : 발주 조회(팝업)
+-- 실행문 : 
+EXEC PR_IM_ORDER_LIST_POPUP
+*/
+CREATE PROCEDURE [dbo].[PR_IM_ORDER_LIST_POPUP]
+(	
+	@P_PO_NO		NVARCHAR(15)		-- PO번호
+)
+AS
+BEGIN
+
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+ 
+	BEGIN TRY 
+		SELECT ROW_NUMBER() OVER(ORDER BY PO_NO DESC) AS ROW_NUM,
+			   A.PO_NO,
+			   A.PO_NAME,
+			   A.PO_ORD_DT,
+			   A.VEN_CODE,
+			   A.LC_NO,
+			   A.BL_NO,
+			   B.VEN_NAME
+		FROM IM_ORDER_HDR AS A
+			INNER JOIN CD_PARTNER_MST AS B ON A.VEN_CODE = B.VEN_CODE
+		WHERE 1 = (CASE WHEN @P_PO_NO <> '' AND A.PO_NO = @P_PO_NO THEN 1 
+					   WHEN @P_PO_NO <> '' AND A.PO_NAME LIKE '%' + @P_PO_NO + '%' THEN 1
+					   ELSE 1 END)
+		ORDER BY A.PO_NO DESC
+	
+	END TRY
+	
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+GO
+

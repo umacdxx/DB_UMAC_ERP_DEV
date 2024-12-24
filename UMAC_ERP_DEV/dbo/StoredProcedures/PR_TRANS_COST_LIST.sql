@@ -1,0 +1,217 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.12.17
+-- 수정일 : - 
+-- 설 명  : 배차내역(운송비) 조회
+-- 실행문 : 
+EXEC PR_TRANS_COST_LIST '', '', '20240901','20241126', '', '','','','','120001,240125'
+*/
+CREATE PROCEDURE [dbo].[PR_TRANS_COST_LIST]
+( 
+	@P_CAR_GB					NVARCHAR(1) = '',			-- 차량구분 1: 일반차량 2: 벌크차량
+	@P_IO_GB					INT,						-- 입출고구분 1: 입고 2: 출고
+	@P_START_DT					NVARCHAR(8) = '',			-- 조회시작일자(입출고일자)
+	@P_END_DT					NVARCHAR(8) = '',			-- 조회종료일자(입출고일자)
+	@P_START_CLOSE_DT			NVARCHAR(8) = '',			-- 조회시작일자(마감일자)
+	@P_END_CLOSE_DT				NVARCHAR(8) = '',			-- 조회종료일자(마감일자)
+	@P_CAR_NO					NVARCHAR(8) = '',			-- 차량번호
+	@P_TRANS_YN					NVARCHAR(1) = '',			-- 배차여부
+	@P_TRANS_SECTION			NVARCHAR(6) = '',			-- 운송구간
+	@P_ITM_GB					VARCHAR(50) = ''			-- 상품구분
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	BEGIN TRY
+		BEGIN
+			WITH LIST AS (
+				SELECT A.DELIVERY_DT,
+					   A.ORD_DT,
+					   A.ORD_NO,
+					   A.CAR_NO,
+					   A.NET_WGHT,
+					   A.OFFICIAL_WGHT,
+					   B.VEN_CODE,
+					   B.TRANS_YN,
+					   CASE WHEN ISNULL(A.TRANS_COST, 0) = 0 AND ISNULL(A.RENT_COST, 0) = 0 THEN dbo.GET_DELIVERY_PRICE('TRANS_COST', B.DELIVERY_PRICE_SEQ, A.CAR_GB ) ELSE ISNULL(A.TRANS_COST, 0) END AS TRANS_COST,
+					   ISNULL(D.TRANS_GB, '') AS TRANS_GB,
+					   ISNULL(D.TRANS_SECTION, '') AS TRANS_SECTION,
+					   ISNULL(E.DELIVERY_NAME, '') AS DELIVERY_NAME,
+					   F.ITM_NAME + (CASE WHEN C.ITM_CNT > 1 THEN ' 외 ' + CAST(C.ITM_CNT - 1 AS VARCHAR) + '건' ELSE '' END) AS ITM_NAME,
+					   C.SCAN_CODE,
+					   C.ITM_GB,
+					   ISNULL(G.CD_NM, '') AS CAR_GB_NM,
+					   ISNULL(H.CD_NM, '') AS TRANS_GB_NM,
+					   ISNULL(A.CAR_GB, '') AS CAR_GB,
+					   B.DELIVERY_REQ_DT AS DELIVERY_REQ_DT,
+					   B.CLOSE_DT AS CLOSE_DT,
+					   '매출' AS IO_GB_NM,
+					   ISNULL(B.R_ADDR, '') + ' ' + ISNULL(B.R_ADDR_DTL, '') AS ADDR,
+					   B.ORD_GB,
+					   CASE WHEN B.ORD_GB = 1 THEN '정상' ELSE '반품' END AS ORD_GB_NM,
+					   PM.VEN_NAME,
+					   'PO_ORDER_HDR' AS HDR_TYPE
+				FROM PO_SCALE A
+				INNER JOIN PO_ORDER_HDR B ON A.ORD_NO = B.ORD_NO
+				INNER JOIN (
+					SELECT A.ORD_NO, COUNT(A.ORD_NO) AS ITM_CNT, MAX(B.SCAN_CODE) AS SCAN_CODE, MAX(ITM_GB) AS ITM_GB
+					FROM PO_ORDER_HDR AS A
+					INNER JOIN PO_ORDER_DTL AS B ON A.ORD_NO = B.ORD_NO
+					WHERE ORD_STAT IN ('33', '35', '40')
+					GROUP BY A.ORD_NO
+				) C ON A.ORD_NO = C.ORD_NO
+				INNER JOIN CD_PARTNER_MST AS PM ON B.VEN_CODE = PM.VEN_CODE
+				LEFT OUTER JOIN CD_DELIVERY_PRICE D ON B.DELIVERY_PRICE_SEQ = D.SEQ
+				LEFT OUTER JOIN CD_PARTNER_DELIVERY E ON E.VEN_CODE = B.VEN_CODE AND E.DELIVERY_CODE = B.DELIVERY_CODE
+				INNER JOIN CD_PRODUCT_CMN F ON F.SCAN_CODE = C.SCAN_CODE
+				LEFT OUTER JOIN TBL_COMM_CD_MST G ON G.CD_CL = 'CAR_GB' AND G.CD_ID = A.CAR_GB
+				LEFT OUTER JOIN TBL_COMM_CD_MST H ON H.CD_CL = 'TRANS_GB' AND H.CD_ID = D.TRANS_GB
+				LEFT OUTER JOIN PO_CAR_INFO I ON I.CAR_NO = A.CAR_NO
+    
+				UNION ALL
+    
+				SELECT A.DELIVERY_DT,
+					   A.ORD_DT,
+					   A.ORD_NO,
+					   A.CAR_NO,
+					   A.NET_WGHT,
+					   A.OFFICIAL_WGHT,
+					   B.VEN_CODE,
+					   B.TRANS_YN,
+					   CASE WHEN ISNULL(A.TRANS_COST, 0) = 0 AND ISNULL(A.RENT_COST, 0) = 0 THEN dbo.GET_DELIVERY_PRICE('TRANS_COST', B.DELIVERY_PRICE_SEQ, A.CAR_GB ) ELSE ISNULL(A.TRANS_COST, 0) END AS TRANS_COST,
+					   ISNULL(D.TRANS_GB, '') AS TRANS_GB,
+					   ISNULL(D.TRANS_SECTION, '') AS TRANS_SECTION,
+					   ISNULL(E.DELIVERY_NAME, '') AS DELIVERY_NAME,
+					   F.ITM_NAME + (CASE WHEN C.ITM_CNT > 1 THEN ' 외 ' + CAST(C.ITM_CNT - 1 AS VARCHAR) + '건' ELSE '' END) AS ITM_NAME,
+					   C.SCAN_CODE,
+					   C.ITM_GB,
+					   ISNULL(G.CD_NM, '') AS CAR_GB_NM,
+					   ISNULL(H.CD_NM, '') AS TRANS_GB_NM,
+					   ISNULL(A.CAR_GB, '') AS CAR_GB,
+					   B.DELIVERY_EXP_DT AS DELIVERY_REQ_DT,
+					   B.CLOSE_DT AS CLOSE_DT,
+					   '매입' AS IO_GB_NM,
+					   ISNULL(B.R_ADDR, '') + ' ' + ISNULL(B.R_ADDR_DTL, '') AS ADDR,
+					   1 AS ORD_GB,
+					   '정상' AS ORD_GB_NM,
+					   PM.VEN_NAME,
+					   'PO_PURCHASE_HDR' AS HDR_TYPE
+				FROM PO_SCALE A
+				INNER JOIN PO_PURCHASE_HDR B ON A.ORD_NO = B.ORD_NO
+				INNER JOIN (
+					SELECT A.ORD_NO, COUNT(A.ORD_NO) AS ITM_CNT, MAX(B.SCAN_CODE) AS SCAN_CODE, MAX(ITM_GB) AS ITM_GB
+					FROM PO_PURCHASE_HDR AS A
+					INNER JOIN PO_PURCHASE_DTL AS B ON A.ORD_NO = B.ORD_NO
+					WHERE PUR_STAT IN ('33', '35', '40')
+					GROUP BY A.ORD_NO
+				) C ON A.ORD_NO = C.ORD_NO
+				INNER JOIN CD_PARTNER_MST AS PM ON B.VEN_CODE = PM.VEN_CODE
+				LEFT OUTER JOIN CD_DELIVERY_PRICE D ON B.DELIVERY_PRICE_SEQ = D.SEQ
+				LEFT OUTER JOIN CD_PARTNER_DELIVERY E ON E.VEN_CODE = B.VEN_CODE AND E.DELIVERY_CODE = B.DELIVERY_CODE
+				INNER JOIN CD_PRODUCT_CMN F ON F.SCAN_CODE = C.SCAN_CODE
+				LEFT OUTER JOIN TBL_COMM_CD_MST G ON G.CD_CL = 'CAR_GB' AND G.CD_ID = A.CAR_GB
+				LEFT OUTER JOIN TBL_COMM_CD_MST H ON H.CD_CL = 'TRANS_GB' AND H.CD_ID = D.TRANS_GB
+				LEFT OUTER JOIN PO_CAR_INFO I ON I.CAR_NO = A.CAR_NO
+			)
+            SELECT A.DELIVERY_DT,
+                   A.ORD_DT,
+                   A.ORD_NO,
+                   A.CAR_NO,
+                   A.NET_WGHT,
+                   A.OFFICIAL_WGHT,
+                   A.TRANS_COST,
+                   A.TRANS_GB,
+                   A.TRANS_SECTION,
+                   A.DELIVERY_NAME,
+                   A.ITM_NAME,
+				   A.SCAN_CODE,
+                   A.CAR_GB_NM,
+                   A.TRANS_GB_NM,
+                   A.CAR_GB,
+                   A.DELIVERY_REQ_DT,
+				   A.CLOSE_DT,
+                   A.IO_GB_NM,
+                   A.ADDR,
+				   A.VEN_CODE,
+                   A.VEN_NAME,
+                   A.HDR_TYPE,
+				   ISNULL(B.LAND_GB, 0) AS LAND_GB,
+				   A.ORD_GB,
+				   A.ORD_GB_NM,
+				   CASE WHEN A.TRANS_YN = 'F' THEN 'FNR배차' WHEN A.TRANS_YN = 'Y' THEN '일반배차' ELSE '배차불필요' END AS TRANS_YN
+			FROM LIST AS A
+			LEFT OUTER JOIN PO_SCALE_GROUP AS B ON A.ORD_NO = B.ORD_NO
+			WHERE 1=1
+			  AND 1 = (CASE WHEN @P_IO_GB = 1 THEN (CASE WHEN A.HDR_TYPE = 'PO_PURCHASE_HDR' THEN 1 ELSE 2 END)
+							WHEN @P_IO_GB = 2 THEN (CASE WHEN A.HDR_TYPE = 'PO_ORDER_HDR' THEN 1 ELSE 2 END) ELSE 1 END)
+			  AND (@P_START_DT = '' OR (ISNULL(A.DELIVERY_DT, A.DELIVERY_REQ_DT) BETWEEN @P_START_DT AND @P_END_DT))
+			  AND (@P_START_CLOSE_DT = '' OR (A.CLOSE_DT BETWEEN @P_START_CLOSE_DT AND @P_END_CLOSE_DT))
+			  AND 1 = (CASE WHEN @P_CAR_GB = '1' AND A.CAR_GB IN ('1', '2', '3', '4', '6') THEN 1 
+							WHEN @P_CAR_GB = '2' AND A.CAR_GB = '5' THEN 1 
+							WHEN @P_CAR_GB = '' THEN 1 ELSE 0 END)
+			  AND 1 = (CASE WHEN @P_CAR_NO = '' THEN 1 WHEN @P_CAR_NO <> '' AND A.CAR_NO LIKE '%' + @P_CAR_NO + '%' THEN 1 ELSE 0 END)																	
+			  AND 1 = (CASE WHEN @P_TRANS_YN = '' THEN 1 WHEN @P_TRANS_YN <> '' AND A.TRANS_YN = @P_TRANS_YN THEN 1 ELSE 0 END)		
+			  AND 1 = (CASE WHEN @P_TRANS_SECTION = '' THEN 1
+			                WHEN @P_TRANS_SECTION <> '' AND A.TRANS_SECTION = @P_TRANS_SECTION THEN 1 ELSE 0 END)
+			  AND (
+					-- 전체
+					(@P_ITM_GB = '') 
+					OR
+					-- SCAN_CODE가 직접 매칭되는 경우(옥배아, 배아박, 백토)
+					SCAN_CODE IN (
+						SELECT VALUE 
+						FROM STRING_SPLIT(@P_ITM_GB, ',')
+						WHERE VALUE NOT IN ('OIL', 'ETC')
+					)
+					OR
+					-- 2. OIL(식용유)
+					(
+						EXISTS (
+							SELECT 1
+							FROM STRING_SPLIT(@P_ITM_GB, ',') AS SplitVal
+							WHERE SplitVal.VALUE = 'OIL'
+						)
+						AND A.ITM_GB IN ('1', '2') 
+						AND SCAN_CODE NOT IN ('120001')
+					)
+					OR
+					-- 3. ETC(기타)
+					(
+						EXISTS (
+							SELECT 1
+							FROM STRING_SPLIT(@P_ITM_GB, ',') AS SplitVal
+							WHERE SplitVal.VALUE = 'ETC'
+						)
+						AND A.ITM_GB NOT IN ('1', '2') 
+						AND SCAN_CODE NOT IN ('120001', '240125', '130002')
+					)
+				)
+			  AND A.VEN_CODE NOT IN (
+								'UM10002',
+								'UM20001',
+								'UM20005' 
+			  )
+			  AND NOT (
+			  	  A.VEN_CODE = 'UM20123' AND A.SCAN_CODE = '240125'
+			  )
+			  AND NOT (
+			  	  A.VEN_CODE IN ('UM10052', 'UM20132')
+			  )
+			ORDER BY A.IO_GB_NM DESC, A.DELIVERY_DT, B.GROUP_NO, B.LAND_GB, A.VEN_NAME
+			 
+		END
+	END TRY
+	
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+GO
+

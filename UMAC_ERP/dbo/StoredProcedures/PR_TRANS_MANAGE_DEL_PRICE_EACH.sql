@@ -1,0 +1,53 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2023.04.01
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 차량구분에 따른 운송비, 용차비
+-- 실행문 : 
+EXEC PR_TRANS_MANAGE_DEL_PRICE_EACH '광주', '2', ''
+*/
+CREATE PROCEDURE [dbo].[PR_TRANS_MANAGE_DEL_PRICE_EACH]
+( 
+	@P_TRANS_SECTION		NVARCHAR(6) = '',		  -- 운송구간
+	@P_CAR_GB				NVARCHAR(2) = '',		  -- 차량구분
+	@P_TRANS_GB				NVARCHAR(1) = '1'		  -- 운송구분
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+ 
+	BEGIN TRY 
+		SELECT 
+			(CASE WHEN @P_CAR_GB = '1' THEN TRANS_COST_1 
+				 WHEN @P_CAR_GB = '2' THEN TRANS_COST_2
+				 WHEN @P_CAR_GB = '3' THEN TRANS_COST_3
+				 WHEN @P_CAR_GB = '4' THEN TRANS_COST_4
+				 WHEN @P_CAR_GB = '5' THEN TRANS_COST_5
+				 ELSE '' END) AS TRANS_COST,
+			(CASE WHEN @P_CAR_GB = '1' THEN RENT_COST_1 
+				 WHEN @P_CAR_GB = '2' THEN RENT_COST_2
+				 WHEN @P_CAR_GB = '3' THEN RENT_COST_3
+				 WHEN @P_CAR_GB = '4' THEN RENT_COST_4
+				 WHEN @P_CAR_GB = '5' THEN RENT_COST_5
+				 ELSE '' END) AS RENT_COST,
+			'' AS LAND_GB
+		FROM CD_DELIVERY_PRICE
+			WHERE TRANS_GB = @P_TRANS_GB
+			AND TRANS_SECTION = @P_TRANS_SECTION
+		
+	END TRY
+	
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+GO
+

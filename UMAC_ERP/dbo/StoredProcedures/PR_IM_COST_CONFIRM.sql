@@ -1,0 +1,64 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.05.24
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 제비용목록 확정
+-- 실행문 : EXEC PR_IM_COST_CONFIRM '2240510008'
+*/
+CREATE PROCEDURE [dbo].[PR_IM_COST_CONFIRM]
+	@P_PO_NO NVARCHAR(15),			-- PO번호
+	@P_EMP_ID NVARCHAR(20) 			-- 아이디
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	DECLARE @COST_SLIP_CNT		INT = 0
+	DECLARE @COST_DTL_CNT		INT = 0
+	DECLARE @RETURN_CODE		INT = 0								-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE		NVARCHAR(50) = DBO.GET_ERR_MSG('0')	-- 리턴메시지
+	 
+	BEGIN TRY 
+		
+		-- 제비용전표 미확정인 데이터 있을경우 확정불가
+
+		SELECT @COST_SLIP_CNT = COUNT(CASE WHEN COST_SLIP = 'N' THEN COST_SLIP END),
+			   @COST_DTL_CNT = COUNT(1)
+		FROM IM_COST_DTL WHERE PO_NO = @P_PO_NO
+
+		IF @COST_SLIP_CNT > 0
+			BEGIN
+				SET @RETURN_CODE = -1 -- 저장실패
+				SET @RETURN_MESSAGE = CONCAT('제비용전표생성이 안된 데이터가 있습니다.', @P_PO_NO)
+			END
+		ELSE IF @COST_DTL_CNT = 0 
+			BEGIN
+				SET @RETURN_CODE = -1 -- 저장실패
+				SET @RETURN_MESSAGE = CONCAT('확정할 데이터가 없습니다.', @P_PO_NO)
+			END
+		ELSE
+			BEGIN
+				UPDATE IM_COST_HDR 
+				   SET COST_CFM = 'Y',
+					   COST_CFM_DT = CONVERT(NVARCHAR(8), GETDATE(), 112)
+				 WHERE PO_NO = @P_PO_NO
+			END
+
+	END TRY
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+
+		SET @RETURN_CODE = -1 -- 저장실패
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1')
+
+	END CATCH
+	
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+END
+
+GO
+

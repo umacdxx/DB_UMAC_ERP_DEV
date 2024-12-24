@@ -1,0 +1,80 @@
+/*
+-- 생성자 :	윤현빈
+-- 등록일 :	2024.03.12
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : IP 접근 정보 저장
+-- 실행문 : EXEC PR_ACCESS_MST_PUT '@P_ACCESS_GB','@P_ACCESS_ID', '@P_LAST_IP_ADDRESS','@P_REMARKS','@P_USE_YN','@P_EMP_ID'
+*/
+CREATE PROCEDURE [dbo].[PR_ACCESS_MST_PUT]
+	@P_ACCESS_GB		VARCHAR(1),		-- 접근 구분 0:IP, 1:ID
+	@P_ACCESS_ID		VARCHAR(20),	-- 접근 아이디
+	@P_LAST_IP_ADDRESS	INT,			-- 대역 마지막 주소
+	@P_USE_YN			VARCHAR(1),		-- 사용여부
+	@P_REMARKS			VARCHAR(2000),	-- 비고
+	@P_EMP_ID			VARCHAR(20)		-- 등록자
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	DECLARE @RETURN_CODE INT = 0			-- 리턴코드
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) = ''		-- 리턴메시지
+
+	BEGIN TRY 
+
+		MERGE TBL_ACCESS_MST AS A
+			USING (SELECT 1 AS DUAL) AS B
+			  ON (A.ACCESS_GB = @P_ACCESS_GB
+			  AND A.ACCESS_ID = @P_ACCESS_ID)
+			WHEN MATCHED THEN
+				UPDATE SET
+				    LAST_IP_ADDRESS = @P_LAST_IP_ADDRESS
+				  , REMARKS = @P_REMARKS
+				  , USE_YN = @P_USE_YN
+				  , UDATE = GETDATE()
+				  , UEMP_ID = @P_EMP_ID
+				  
+			WHEN NOT MATCHED THEN
+				INSERT(
+					ACCESS_GB
+				  , ACCESS_ID
+				  , LAST_IP_ADDRESS
+				  , REMARKS
+				  , USE_YN
+				  , IDATE
+				  , IEMP_ID
+				  , UDATE
+				  , UEMP_ID
+				)
+				VALUES(
+					@P_ACCESS_GB
+				  , @P_ACCESS_ID
+				  , @P_LAST_IP_ADDRESS
+				  , @P_REMARKS
+				  , @P_USE_YN
+				  , GETDATE()
+				  , @P_EMP_ID
+				  , GETDATE()
+				  , @P_EMP_ID
+				)
+				;
+
+		SET @RETURN_CODE = 0 -- 저장되었습니다.
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('0')
+
+	END TRY
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+
+		SET @RETURN_CODE = -1 -- 저장실패
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1')
+	END CATCH
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+END
+
+GO
+

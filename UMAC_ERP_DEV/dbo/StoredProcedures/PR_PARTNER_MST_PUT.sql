@@ -1,0 +1,123 @@
+
+/*
+-- 생성자 :	이동호
+-- 등록일 :	2024.01.08
+-- 수정자 : 2024.12.16 강세미- DIRECT_EXPORT_YN(직수입여부) 추가
+-- 수정일 : - 
+-- 설 명	:  거래처 정보 저장
+-- 실행문 : 
+*/
+CREATE PROCEDURE [dbo].[PR_PARTNER_MST_PUT]
+(
+	@P_VEN_CODE NVARCHAR(7),							-- 거래처코드
+	@P_VEN_NAME NVARCHAR(50), 							-- 협력업체명
+	@P_VEN_GB NVARCHAR(10), 							-- 거래처구분 1 : 매입처, 2 : 매출처, 3 : 수입처, 4 : 기타
+	@P_REP_NAME NVARCHAR(50)= '', 						-- 대표자명
+	@P_POST_NO NVARCHAR(5)= '', 						-- 우편번호
+	@P_ADDR NVARCHAR(50) = '', 							-- 주소
+	@P_ADDR_DTL NVARCHAR(50) = '', 						-- 상세주소
+	@P_UPJONG NVARCHAR(50) = '', 						-- 업종			
+	@P_UPTAE NVARCHAR(50) = '',							-- 업태
+	@P_BUSI_NO NVARCHAR(13) = '', 						-- 사업자번호
+	@P_TEL_NO	NVARCHAR(14) = '',						-- 전화번호
+	@P_FAX_NO	NVARCHAR(14) = '',						-- 팩스번호
+	@P_REP_MAIL_ID NVARCHAR(120) = '',					-- 대표이메일
+	@P_PARTNER_CD NVARCHAR(15) = '',					-- 더존 거래처코드
+	@P_MGNT_USER_ID NVARCHAR(20) = '',					-- 담당자(매출관리직원아이디)	
+	@P_BANK_CODE NVARCHAR(3) = '',						-- 은행코드
+	@P_BANK_ACC_NO NVARCHAR(20) = '',					-- 계좌번호
+	@P_BANK_ACC_OWN NVARCHAR(20) = '',					-- 예금주 명칭
+	@P_CREDIT_LIMIT_YN NVARCHAR(1) = '',				-- 여신한도 사용여부
+	@P_CREDIT_LIMIT NUMERIC(13, 0) = 0,					-- 여신한도
+	@P_DIRECT_EXPORT_YN NVARCHAR(1),					-- 직수입여부
+	@P_USE_YN NVARCHAR(1) = '',							-- 사용여부
+	@P_IEMP_ID NVARCHAR(20)								-- 등록 아이디	
+)
+AS
+BEGIN
+	
+	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+		
+	DECLARE @RETURN_CODE INT = 0					-- 결과코드 정상 : '0', 실패 : -1
+	DECLARE @RETURN_MESSAGE VARCHAR(50) = 'OK'		-- 결과메시지
+	DECLARE @P_BANK_ACC_NO_ENCRYPT VARBINARY(256) = NULL
+	DECLARE @MGNT_DEPT VARCHAR(25) = ''				-- 조직코드
+			
+	BEGIN TRY 
+	EXEC UMAC_CERT_OPEN_KEY; -- OPEN
+		
+		--계좌번호 있을겨우 암호화
+		IF @P_BANK_ACC_NO != ''
+			SET @P_BANK_ACC_NO_ENCRYPT = DBO.GET_ENCRYPT(@P_BANK_ACC_NO);
+					
+		SELECT @MGNT_DEPT = DEPT_CODE FROM TBL_USER_MST WHERE [USER_ID] = @P_MGNT_USER_ID
+
+		IF EXISTS(SELECT VEN_CODE FROM CD_PARTNER_MST WHERE VEN_CODE = @P_VEN_CODE)
+		BEGIN
+
+			-- 수정
+			UPDATE CD_PARTNER_MST SET VEN_NAME = @P_VEN_NAME, VEN_GB = @P_VEN_GB, REP_NAME = @P_REP_NAME, 
+				POST_NO = @P_POST_NO, ADDR = @P_ADDR, ADDR_DTL = @P_ADDR_DTL,
+				UPJONG = @P_UPJONG, UPTAE = @P_UPTAE, BUSI_NO = @P_BUSI_NO, 
+				TEL_NO = @P_TEL_NO, FAX_NO = @P_FAX_NO, REP_MAIL_ID = @P_REP_MAIL_ID, PARTNER_CD = @P_PARTNER_CD, MGNT_DEPT = @MGNT_DEPT, MGNT_USER_ID = @P_MGNT_USER_ID,
+				BANK_CODE = @P_BANK_CODE, BANK_ACC_NO = @P_BANK_ACC_NO_ENCRYPT, BANK_ACC_OWN = @P_BANK_ACC_OWN,
+				--CREDIT_LIMIT_YN = @P_CREDIT_LIMIT_YN, 
+				--CREDIT_LIMIT = @P_CREDIT_LIMIT, 
+				DIRECT_EXPORT_YN = @P_DIRECT_EXPORT_YN,
+				USE_YN = @P_USE_YN,
+				UEMP_ID = @P_IEMP_ID, 
+				UDATE = GETDATE()
+			WHERE VEN_CODE = @P_VEN_CODE
+		
+		END
+		ELSE
+		BEGIN
+			IF EXISTS(SELECT 1 FROM CD_PARTNER_MST WHERE BUSI_NO = @P_BUSI_NO) AND @P_VEN_GB != '3' AND @P_VEN_GB != '4'
+			BEGIN
+				SET @RETURN_CODE = 9
+				SET @RETURN_MESSAGE = '동일한 사업자번호로 등록된 거래처가 있습니다.'
+			END
+			ELSE 
+			BEGIN
+				-- 등록
+				INSERT INTO CD_PARTNER_MST (VEN_CODE, VEN_NAME, VEN_GB, REP_NAME, POST_NO, ADDR, ADDR_DTL
+				, UPJONG, UPTAE, BUSI_NO, TEL_NO, FAX_NO, REP_MAIL_ID, PARTNER_CD, MGNT_DEPT, MGNT_USER_ID
+				, BANK_CODE, BANK_ACC_NO, BANK_ACC_OWN,
+				--CREDIT_LIMIT_YN, 
+				--CREDIT_LIMIT, 
+				DIRECT_EXPORT_YN,
+				USE_YN,
+				IEMP_ID, 
+				IDATE) 
+				SELECT @P_VEN_CODE, @P_VEN_NAME, @P_VEN_GB, @P_REP_NAME, @P_POST_NO, @P_ADDR, @P_ADDR_DTL, 
+				@P_UPJONG, @P_UPTAE, @P_BUSI_NO, @P_TEL_NO, @P_FAX_NO, @P_REP_MAIL_ID, @P_PARTNER_CD, @MGNT_DEPT, @P_MGNT_USER_ID, 
+				@P_BANK_CODE, @P_BANK_ACC_NO_ENCRYPT, @P_BANK_ACC_OWN,
+				--@P_CREDIT_LIMIT_YN, 
+				--@P_CREDIT_LIMIT, 
+				@P_DIRECT_EXPORT_YN,
+				@P_USE_YN,
+				@P_IEMP_ID, 
+				GETDATE()
+			END
+		END
+	EXEC UMAC_CERT_CLOSE_KEY -- CLOSE
+	END TRY
+	BEGIN CATCH	
+		SET @RETURN_CODE  = -1
+		SET @RETURN_MESSAGE  = ERROR_MESSAGE()			
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()					-- 에러라인
+		, GETDATE()
+						        				        		
+	END CATCH
+	
+	--결과 출력
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+    
+END
+
+GO
+

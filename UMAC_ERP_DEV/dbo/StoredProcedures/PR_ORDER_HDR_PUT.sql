@@ -1,0 +1,159 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.02.19
+-- 수정 : 강세미 2024.05.09 - DELIVERY_PRICE_SEQ 추가
+-- 수정 : 이동호 2024.10.30 - ORD_GB, ORD_STAT 필드 추가
+-- 설 명  : 주문등록 HDR 저장 '', 
+-- 실행문 : EXEC PR_ORDER_HDR_PUT
+*/
+CREATE PROCEDURE [dbo].[PR_ORDER_HDR_PUT]
+	@P_ORD_NO NVARCHAR(11) = null,			-- 주문번호
+	@P_ORD_GB INT,							-- 주문구분 1 : 정상, 2 : 반품	
+	@P_VEN_CODE NVARCHAR(7), 				-- 거래처코드
+	@P_DELIVERY_REQ_DT NVARCHAR(8),			-- 출고요청일
+	@P_ARRIVAL_REQ_DT NVARCHAR(8),			-- 도착요청일
+	@P_DELIVERY_CODE NVARCHAR(7) = null,	-- 배송지코드
+	@P_R_POST_NO NVARCHAR(5),				-- 우편번호
+	@P_R_ADDR NVARCHAR(100),				-- 주소
+	@P_R_ADDR_DTL NVARCHAR(50),				-- 상세주소
+	@P_TRANS_YN NVARCHAR(1),				-- 배차사용여부
+	@P_ORD_STAT NVARCHAR(2),				-- 주문상태
+	@P_REMARKS NVARCHAR(2000),				-- 비고
+	@P_DOCUMENT_REQ_1 NVARCHAR(2),			-- 첨부서류1
+	@P_DOCUMENT_REQ_2 NVARCHAR(2),			-- 첨부서류2
+	@P_DOCUMENT_REQ_3 NVARCHAR(2),			-- 첨부서류3
+	@P_DOCUMENT_REQ_4 NVARCHAR(2),			-- 첨부서류4
+	@P_DOCUMENT_REMARKS NVARCHAR(100),		-- 추가첨부서류비고
+	@P_EMP_ID NVARCHAR(20) 					-- 아이디
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	
+	DECLARE @NEW_NO NVARCHAR(8)										-- 신규번호
+	DECLARE @NEW_SEQ NVARCHAR(3)									-- 신규SEQ
+	DECLARE @DELIVERY_PRICE_SEQ INT									-- 운송비마스터SEQ
+	DECLARE @RETURN_CODE INT = 0									-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE NVARCHAR(30) = DBO.GET_ERR_MSG('0')		-- 리턴메시지
+
+	BEGIN TRY 
+		
+		-- 상태 값 확인(상차확정 이후 수정 불가)
+		IF EXISTS (SELECT 1 FROM PO_ORDER_HDR WHERE ORD_NO = @P_ORD_NO AND ORD_STAT IN ('33', '35', '40'))
+		BEGIN
+			SET @RETURN_CODE = -1
+			SET @RETURN_MESSAGE = '상차확정 후 수정 불가합니다.';
+		END
+		ELSE
+		BEGIN
+			-- 운송비SEQ
+		IF @P_DELIVERY_CODE != ''
+			SELECT @DELIVERY_PRICE_SEQ = A.SEQ 
+				FROM CD_DELIVERY_PRICE A
+				INNER JOIN CD_PARTNER_DELIVERY B ON A.SEQ = B.DELIVERY_PRICE_SEQ
+			WHERE B.VEN_CODE = @P_VEN_CODE AND B.DELIVERY_CODE = @P_DELIVERY_CODE
+
+		IF @P_ORD_NO = ''
+			BEGIN
+			-- INSERT
+			SELECT @NEW_NO = CONCAT('2', CONVERT(NVARCHAR(6), GETDATE(), 12))
+			SELECT @NEW_SEQ = ISNULL(MAX(RIGHT(ORD_NO,3)),'0') +1 FROM PO_ORDER_HDR WHERE (CONVERT(VARCHAR(8), IDATE, 112) = CONVERT(VARCHAR(8), GETDATE(), 112))
+			SET @NEW_SEQ = CASE WHEN LEN(@NEW_SEQ) = 1 THEN CONCAT('00',@NEW_SEQ)
+							    WHEN LEN(@NEW_SEQ) = 2 THEN CONCAT('0',@NEW_SEQ)
+							ELSE @NEW_SEQ END
+			SET @P_ORD_NO = CONCAT(@NEW_NO, @NEW_SEQ)
+			SET @P_ORD_GB = ISNULL(@P_ORD_GB, 1)
+			SET @P_ORD_STAT = ISNULL(@P_ORD_STAT, '05')
+
+			INSERT INTO PO_ORDER_HDR(
+							ORD_NO,							
+							ORD_NO_PARENT,
+							ORD_DT,
+							ORD_GB,
+							VEN_CODE,
+							DELIVERY_REQ_DT,
+							ARRIVAL_REQ_DT,
+							DELIVERY_CODE,
+							R_POST_NO,
+							R_ADDR,
+							R_ADDR_DTL,
+							ORD_STAT,
+							TRANS_YN,
+							REMARKS,
+							DOCUMENT_REQ_1,
+							DOCUMENT_REQ_2,
+							DOCUMENT_REQ_3,
+							DOCUMENT_REQ_4,
+							DOCUMENT_REMARKS,
+							IDATE,
+							IEMP_ID,
+							ORD_CFM,
+							DELIVERY_PRICE_SEQ
+							) VALUES (
+							@P_ORD_NO,
+							@P_ORD_NO,
+							CONVERT(NVARCHAR(8), GETDATE(), 112),
+							@P_ORD_GB,
+							@P_VEN_CODE,
+							@P_DELIVERY_REQ_DT,
+							@P_ARRIVAL_REQ_DT,
+							@P_DELIVERY_CODE,
+							@P_R_POST_NO,
+							@P_R_ADDR,
+							@P_R_ADDR_DTL,
+							@P_ORD_STAT,
+							@P_TRANS_YN,
+							@P_REMARKS,
+							@P_DOCUMENT_REQ_1,
+							@P_DOCUMENT_REQ_2,
+							@P_DOCUMENT_REQ_3,
+							@P_DOCUMENT_REQ_4,
+							@P_DOCUMENT_REMARKS,
+							GETDATE(), 
+							@P_EMP_ID,
+							'N',
+							@DELIVERY_PRICE_SEQ
+							)
+			END
+		ELSE
+			BEGIN
+				-- UPDATE
+				 UPDATE PO_ORDER_HDR
+					 SET VEN_CODE = @P_VEN_CODE,
+						  DELIVERY_REQ_DT = @P_DELIVERY_REQ_DT,
+						  ARRIVAL_REQ_DT = @P_ARRIVAL_REQ_DT,
+						  DELIVERY_CODE = @P_DELIVERY_CODE,
+						  R_POST_NO = @P_R_POST_NO,
+						  R_ADDR = @P_R_ADDR,
+						  R_ADDR_DTL = @P_R_ADDR_DTL,
+						  TRANS_YN = @P_TRANS_YN,
+						  REMARKS = @P_REMARKS,
+						  DOCUMENT_REQ_1 = @P_DOCUMENT_REQ_1,
+						  DOCUMENT_REQ_2 = @P_DOCUMENT_REQ_2,
+						  DOCUMENT_REQ_3 = @P_DOCUMENT_REQ_3,
+						  DOCUMENT_REQ_4 = @P_DOCUMENT_REQ_4,
+						  DOCUMENT_REMARKS = @P_DOCUMENT_REMARKS,
+						  UDATE = GETDATE(), 
+						  UEMP_ID = @P_EMP_ID,
+						  DELIVERY_PRICE_SEQ = @DELIVERY_PRICE_SEQ
+				  WHERE ORD_NO = @P_ORD_NO
+			END
+		END
+
+	END TRY
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+		
+		SET @RETURN_CODE = -1 -- 저장실패
+		SET @RETURN_MESSAGE = ERROR_MESSAGE()
+	END CATCH
+	
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE, @P_ORD_NO AS ORD_NO 
+END
+
+GO
+

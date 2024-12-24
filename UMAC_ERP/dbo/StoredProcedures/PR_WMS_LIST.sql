@@ -1,0 +1,208 @@
+
+/*
+-- 생성자 :	이동호
+-- 등록일 :	2024.09.25
+-- 설 명  : 입출고 예정조회(계근대) 리스트
+
+-- 수정자 : 2024.11.01 이동호 - ORD_GB 주문구분 컬럼 추가 (1:정상, 2:반품)
+			2024.11.29 강세미 - 배차여부 수정
+
+-- 실행문 : 
+
+EXEC PR_WMS_LIST '','20240801','20240829','','','','','','',''
+*/
+
+
+CREATE PROCEDURE [dbo].[PR_WMS_LIST]
+( 
+	@P_IO_GB					INT				= 0,	-- 입출고구분(입고:1, 출고:2)
+	@P_FROM_ORD_DT				NVARCHAR(10)	= '',	-- 주문(발주) 일자
+	@P_TO_ORD_DT				NVARCHAR(10)	= '',	-- 주문(발주) 일자
+	@P_FROM_DELIVERY_REQ_DT		NVARCHAR(10)	= '',	-- 입출고요청 일자
+	@P_TO_DELIVERY_REQ_DT		NVARCHAR(10)	= '',	-- 입출고요청 일자
+	@P_ORD_STAT					NVARCHAR(30)	= '',	-- 출고상태
+	@P_PUR_STAT					NVARCHAR(30)	= '',	-- 입고상태
+	@P_VEN_CODE					NVARCHAR(50)	= '',	-- 거래처명(코드)
+	@P_ORD_NO					NVARCHAR(11)	= '',	-- 주문(발주)번호
+	@P_SCAN_CODE				NVARCHAR(14)	= '',	-- 상품명(코드)
+	@P_CAR_NO					NVARCHAR(8)	= ''		-- 차량번호
+)
+AS
+BEGIN
+
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	BEGIN TRY 
+				
+			SET @P_IO_GB = ISNULL(@P_IO_GB , 0)
+
+			SELECT 	
+				ROW_NUMBER() OVER(ORDER BY (SELECT 1)) AS ROW_NUM
+				, 0 AS TOT_CNT 
+				, CASE WHEN A.IO_GB = 1 THEN '입고' ELSE '출고' END AS IO_GB					--입고/출고 구분								
+				, IIF(A.CLOSE_STAT = 'Y', '확정', '미확정')  AS CLOSE_STAT						--마감확정여부
+				, A.ORD_NO																		--입/출고 번호
+				, A.ORD_NO_PARENT																--착지 그룹 주문번호
+				, A.ORD_GB																		--주문구분 (1:정상, 2:반품)
+				, A.VEN_CODE																	--거래처코드
+				, ISNULL(B.VEN_NAME, '') AS VEN_NAME											--거래처명
+				, A.DELIVERY_REQ_DT																--출고 요청일자
+				, C.ITM_NAME + (CASE WHEN A.ITM_CNT > 1 THEN ' 외 ' + CAST(A.ITM_CNT -1 AS VARCHAR) + '건' ELSE '' END) AS ITM_NAME -- 제품명
+				, CONCAT(A.ADDR, ' ', A.ADDR_DTL) AS ADDR										--배송주소
+				, A.[STATUS]																	--입출고상태
+				, A.ITM_CNT																		--제품수량
+				, ISNULL(A.IO_AMT,0) AS IO_AMT													--입출고금액
+				, A.DOCUMENT_REQ																--첨부서류 항목
+				--, E.GROUP_NO	
+				, CASE WHEN A.TRANS_YN = 'F' THEN 'FNR배차' WHEN A.TRANS_YN = 'Y' THEN '일반배차' ELSE '배차불필요' END AS TRANS_YN	--배차여부
+				, A.STATUS_CD																	--입출고상태코드
+				, A.TEL_NO																		--배송지전화번호
+				--, A.DELIVERY_NAME																--배송지이름
+				, A.DELIVERY_NAME_DEP1															--배송그룹명
+				, A.DELIVERY_NAME_DEP2															--배송지명
+				, (CASE WHEN E.LAND_GB IS NULL THEN 0 ELSE E.LAND_GB END ) AS LAND_GB			--착지구간(1착,2착)
+				, (ISNULL(PS.GROSS_WGHT, 0) - ISNULL(PS.UNLOAD_WGHT, 0)) AS TOT_WGHT			--상품중량
+				, PS.CAR_NO																		--차량번호
+				, ISNULL(CASE WHEN CONVERT(CHAR(8), GETDATE(), 112) = CONVERT(CHAR(8), PS.IN_IDATE, 112) THEN PS.IN_IDATE ELSE NULL END , '9999-12-31') AS IN_IDATE
+				, PS.REMARKS
+				, ISNULL(A.FILE_YN, 'N') AS FILE_YN
+			FROM (
+		
+				SELECT A.ORD_DT
+					, 2 AS IO_GB					
+					, A.ORD_STAT AS IO_STAT
+					, A.ORD_NO
+					, A.ORD_NO_PARENT
+					, A.ORD_GB
+					, A.VEN_CODE					
+					, A.DELIVERY_REQ_DT		
+					, A.R_ADDR AS ADDR
+					, A.R_ADDR_DTL AS ADDR_DTL
+					, (CONCAT_WS('|', IIF(A.DOCUMENT_REQ_1 IS NULL, NULL, I.CD_NM1),
+								  IIF(A.DOCUMENT_REQ_2 IS NULL, NULL, I.CD_NM2),
+								  IIF(A.DOCUMENT_REQ_3 IS NULL, NULL, I.CD_NM3),
+								  IIF(A.DOCUMENT_REQ_4 IS NULL, NULL, I.CD_NM4))
+					 ) AS DOCUMENT_REQ
+					, A.TRANS_YN
+					, A.ORD_STAT AS STATUS_CD
+					, A.CLOSE_STAT
+					, B.ITM_CNT
+					, B.SCAN_CODE
+					, B.IO_AMT
+					, C.CD_NM AS [STATUS]
+					--, PD.DELIVERY_NAME
+					, PD.TEL_NO
+					, PD.DELIVERY_NAME_DEP1
+					, PD.DELIVERY_NAME_DEP2
+					, DR.FILE_YN
+				FROM PO_ORDER_HDR AS A INNER JOIN (
+					SELECT A.ORD_NO, COUNT(A.ORD_NO) AS ITM_CNT, MAX(B.SCAN_CODE) AS SCAN_CODE, SUM(ISNULL(B.PICKING_SAMT, 0)) AS IO_AMT   
+						FROM PO_ORDER_HDR AS A	
+							INNER JOIN PO_ORDER_DTL AS B ON A.ORD_NO = B.ORD_NO												
+							WHERE 1 = (CASE WHEN @P_ORD_NO = '' THEN 1 WHEN @P_ORD_NO <> '' AND A.ORD_NO LIKE '%'+@P_ORD_NO+'%' THEN 1 ELSE 0 END ) 
+									AND (@P_FROM_ORD_DT = '' OR (A.ORD_DT BETWEEN @P_FROM_ORD_DT AND @P_TO_ORD_DT))
+									AND 1 = (CASE WHEN @P_VEN_CODE = '' THEN 1 WHEN  @P_VEN_CODE <> '' AND @P_VEN_CODE = A.VEN_CODE THEN 1 ELSE 0 END )					
+									AND (@P_FROM_DELIVERY_REQ_DT = '' OR (A.DELIVERY_REQ_DT BETWEEN @P_FROM_DELIVERY_REQ_DT AND @P_TO_DELIVERY_REQ_DT))
+									AND 1 = (CASE WHEN @P_ORD_STAT = '' THEN 1 WHEN  @P_ORD_STAT <> '' AND A.ORD_STAT IN ( SELECT VALUE FROM STRING_SPLIT(@P_ORD_STAT, ',')) THEN 1 ELSE 0 END ) 							
+									AND 1 = (CASE WHEN @P_SCAN_CODE = '' THEN 1 WHEN @P_SCAN_CODE <> '' AND B.SCAN_CODE = @P_SCAN_CODE THEN 1 ELSE 0 END) 
+									AND 1 = (CASE WHEN @P_IO_GB = 1 THEN 2 ELSE 1 END)
+								GROUP BY A.ORD_NO
+				)  AS B ON A.ORD_NO = B.ORD_NO				
+					LEFT OUTER JOIN TBL_COMM_CD_MST AS C ON C.CD_CL = 'ORD_STAT' AND A.ORD_STAT = C.CD_ID		
+					LEFT OUTER JOIN VIEW_COMM_CD_MST_DOCUMENT AS I 
+						ON (A.DOCUMENT_REQ_1 = I.CD_ID1 
+						OR A.DOCUMENT_REQ_2 = I.CD_ID2 
+						OR A.DOCUMENT_REQ_3 = I.CD_ID3 
+						OR A.DOCUMENT_REQ_4 = I.CD_ID4)		
+					LEFT OUTER JOIN 
+					(
+						SELECT 
+							A.VEN_CODE, 
+							A.DELIVERY_CODE, 
+							(CASE WHEN A.DELIVERY_GB = '1' THEN '' ELSE A.DELIVERY_NAME END ) AS DELIVERY_NAME_DEP2,	--배송지명
+							A.TEL_NO,																					--전화번호
+							B.DELIVERY_NAME AS DELIVERY_NAME_DEP1														--배송그룹명
+						FROM CD_PARTNER_DELIVERY AS A
+						LEFT OUTER JOIN CD_PARTNER_DELIVERY AS B ON A.VEN_CODE = B.VEN_CODE AND CONCAT(SUBSTRING(A.DELIVERY_CODE, 1, 5), '01') = B.DELIVERY_CODE					
+					) AS PD ON A.VEN_CODE = PD.VEN_CODE AND A.DELIVERY_CODE = PD.DELIVERY_CODE
+					LEFT OUTER JOIN	(
+						SELECT 
+							CASE WHEN COUNT(ORD_NO) > 0 THEN 'Y' ELSE 'N' END AS FILE_YN, 
+							ORD_NO
+						FROM PO_DOCUMENT_REQ
+						GROUP BY ORD_NO
+					) AS DR ON A.ORD_NO = DR.ORD_NO
+					WHERE A.ORD_STAT IN ('10', '25', '33', '35')
+
+				UNION ALL 
+
+				SELECT A.ORD_DT
+					, 1 AS IO_GB					
+					, A.PUR_STAT AS IO_STAT
+					, A.ORD_NO
+					, A.ORD_NO AS ORD_NO_PARENT
+					, 1 AS ORD_GB
+					, A.VEN_CODE					
+					, A.DELIVERY_EXP_DT AS DELIVERY_REQ_DT
+					, A.R_ADDR AS ADDR
+					, A.R_ADDR_DTL AS ADDR_DTL
+					, '' AS DOCUMENT_REQ
+					, A.TRANS_YN
+					, A.PUR_STAT AS STATUS_CD
+					, A.CLOSE_STAT
+					, B.ITM_CNT
+					, B.SCAN_CODE
+					, B.IO_AMT
+					, C.CD_NM AS [STATUS]	
+					--, '' AS DELIVERY_NAME
+					, '' AS TEL_NO
+					, '' AS DELIVERY_NAME_DEP1
+					, '' AS DELIVERY_NAME_DEP2
+					, 'N' AS FILE_YN
+				FROM PO_PURCHASE_HDR AS A INNER JOIN (
+						SELECT A.ORD_NO, COUNT(A.ORD_NO) AS ITM_CNT, MAX(B.SCAN_CODE) AS SCAN_CODE, SUM(ISNULL(B.PUR_WAMT, 0)) AS IO_AMT   
+							FROM PO_PURCHASE_HDR AS A	
+								INNER JOIN PO_PURCHASE_DTL AS B ON A.ORD_NO = B.ORD_NO													
+								WHERE 1 = (CASE WHEN @P_ORD_NO = '' THEN 1 WHEN @P_ORD_NO <> '' AND A.ORD_NO LIKE '%'+@P_ORD_NO+'%' THEN 1 ELSE 0 END )														
+										AND (@P_FROM_ORD_DT = '' OR (A.ORD_DT BETWEEN @P_FROM_ORD_DT AND @P_TO_ORD_DT))
+										AND 1 = (CASE WHEN @P_VEN_CODE = '' THEN 1 WHEN  @P_VEN_CODE <> '' AND @P_VEN_CODE = A.VEN_CODE THEN 1 ELSE 0 END ) 
+										AND (@P_FROM_DELIVERY_REQ_DT = '' OR (A.DELIVERY_EXP_DT BETWEEN @P_FROM_DELIVERY_REQ_DT AND @P_TO_DELIVERY_REQ_DT))
+										AND 1 = (CASE WHEN @P_PUR_STAT = '' THEN 1 WHEN  @P_PUR_STAT <> '' AND A.PUR_STAT IN ( SELECT VALUE FROM STRING_SPLIT(@P_PUR_STAT, ',')) THEN 1 ELSE 0 END ) 			
+										AND 1 = (CASE WHEN @P_SCAN_CODE = '' THEN 1 WHEN @P_SCAN_CODE <> '' AND B.SCAN_CODE = @P_SCAN_CODE THEN 1 ELSE 0 END) 
+										AND 1 = (CASE WHEN @P_IO_GB = 2 THEN 2 ELSE 1 END)
+						GROUP BY A.ORD_NO
+				)  AS B ON A.ORD_NO = B.ORD_NO
+					LEFT OUTER JOIN TBL_COMM_CD_MST AS C ON C.CD_CL = 'PUR_STAT' AND A.PUR_STAT = C.CD_ID
+					WHERE A.PUR_STAT IN ('10', '25', '33', '35')
+					
+			) AS A
+				LEFT OUTER JOIN CD_PARTNER_MST AS B ON A.VEN_CODE = B.VEN_CODE
+				LEFT OUTER JOIN CD_PRODUCT_CMN AS C ON A.SCAN_CODE = C.SCAN_CODE
+				LEFT OUTER JOIN PO_SCALE AS PS ON A.ORD_NO = PS.ORD_NO
+				LEFT OUTER JOIN PO_SCALE_GROUP AS E ON A.ORD_NO = E.ORD_NO
+				WHERE 1 = (CASE WHEN @P_IO_GB > 0 AND A.IO_GB = @P_IO_GB THEN 1 WHEN @P_IO_GB = 0 THEN 1 ELSE 2 END)	
+					AND 1 = (CASE WHEN ISNULL(@P_CAR_NO, '') NOT IN('') AND PS.CAR_NO LIKE '%' + @P_CAR_NO THEN 1 WHEN ISNULL(@P_CAR_NO, '') = '' THEN 1 ELSE 0 END)
+				
+				
+				ORDER BY 
+				IN_IDATE ASC, 
+				A.IO_GB DESC, 
+				ISNULL(A.DELIVERY_REQ_DT, 99999999), 
+				A.ORD_NO_PARENT ASC, E.LAND_GB ASC
+		;
+
+	END TRY
+	
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+GO
+

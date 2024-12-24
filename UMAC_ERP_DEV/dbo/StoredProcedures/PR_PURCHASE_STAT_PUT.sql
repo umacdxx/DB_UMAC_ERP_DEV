@@ -1,0 +1,108 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.03.05
+-- 수정일 : 2024.10.24 강세미 : 입고일자 변경 시 마감일자도 같이 변경
+		    2024.11.15 강세미 : 입고일자, 마감일자 - 계근일자로 변경
+-- 설 명  : 발주등록 상태변경 
+-- 실행문 : EXEC PR_PURCHASE_STAT_PUT '124053001','35','admin'
+*/
+CREATE PROCEDURE [dbo].[PR_PURCHASE_STAT_PUT]
+	@P_ORD_NO NVARCHAR(11),			-- 발주번호
+	@P_PUR_STAT NVARCHAR(2),		-- 주문상태
+	@P_EMP_ID NVARCHAR(20) 			-- 아이디
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	 
+	DECLARE @RETURN_CODE INT = 0						-- 리턴코드
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) = '저장되었습니다.'		-- 리턴메시지
+	
+	DECLARE @PUR_QTY			NUMERIC(15,2) = 0					-- 입고수량
+	DECLARE @MIN				INT = 0								-- WHILE 사용값
+	DECLARE @MAX				INT = 0								-- WHILE 사용값
+	DECLARE @SCAN_CODE			NVARCHAR(14) = ''					-- 스캔코드
+
+	BEGIN TRAN
+	BEGIN TRY 
+		IF @P_PUR_STAT = '10' -- 발주확정
+			BEGIN
+				UPDATE PO_PURCHASE_HDR
+					SET PUR_STAT = @P_PUR_STAT,
+					    PUR_CFM = 'Y',
+					    PUR_CFM_DT = CONVERT(NVARCHAR(8), GETDATE(), 112),
+					    UDATE = GETDATE(),
+					    UEMP_ID = @P_EMP_ID
+					WHERE ORD_NO = @P_ORD_NO;
+			END
+			/* 배차확정취소 -> 발주등록 상태변경 */
+		ELSE IF @P_PUR_STAT = '30'
+			BEGIN
+				UPDATE PO_ORDER_HDR
+					SET ORD_STAT = '10',
+						UDATE = GETDATE(),
+						UEMP_ID = @P_EMP_ID
+					WHERE ORD_NO = @P_ORD_NO;
+				
+				DELETE PO_SCALE WHERE ORD_NO = @P_ORD_NO;
+			END
+		ELSE 
+			BEGIN
+				UPDATE PO_PURCHASE_HDR
+					SET PUR_STAT = @P_PUR_STAT,
+					    UDATE = GETDATE(),
+					    UEMP_ID = @P_EMP_ID
+					WHERE ORD_NO = @P_ORD_NO;
+			END 
+
+		/* 입고완료 입고일자 수정, 재고처리 */
+		IF @P_PUR_STAT = '35'
+			BEGIN
+				-- 입고일자, 마감일자 수정
+				UPDATE PO_PURCHASE_HDR 
+				   SET DELIVERY_IN_DT = A.SCALE_DT,
+					   CLOSE_DT  = A.SCALE_DT
+				  FROM PO_SCALE AS A
+				 WHERE PO_PURCHASE_HDR.ORD_NO = @P_ORD_NO AND PO_PURCHASE_HDR.ORD_NO = A.ORD_NO;
+
+				UPDATE PO_SCALE	
+						SET DELIVERY_DT = SCALE_DT
+					WHERE ORD_NO = @P_ORD_NO;
+
+				-- 재고처리
+				SELECT @MAX = COUNT(*) FROM PO_PURCHASE_DTL WHERE ORD_NO = @P_ORD_NO
+
+				WHILE  @MIN < @MAX
+				BEGIN
+
+					SELECT @SCAN_CODE = SCAN_CODE FROM PO_PURCHASE_DTL WHERE ORD_NO = @P_ORD_NO ORDER BY SEQ OFFSET @MIN ROWS FETCH NEXT 1 ROWS ONLY;
+					SELECT @PUR_QTY = ISNULL(PUR_QTY, 0) FROM PO_PURCHASE_DTL WHERE ORD_NO = @P_ORD_NO AND SCAN_CODE = @SCAN_CODE;
+					
+					EXEC PR_IV_PRODUCT_STAT_HDR_PUT @SCAN_CODE, @PUR_QTY, 'PR_PURCHASE_STAT_PUT', 0, '', '', '', @RETURN_CODE OUT, @RETURN_MESSAGE OUT
+
+					SET @MIN = @MIN + 1;
+				END
+			END
+		COMMIT
+	END TRY
+	BEGIN CATCH		
+		IF @@TRANCOUNT > 0
+		BEGIN 
+			ROLLBACK TRAN
+			
+			--에러 로그 테이블 저장
+			INSERT INTO TBL_ERROR_LOG 
+			SELECT ERROR_PROCEDURE()	-- 프로시저명
+			, ERROR_MESSAGE()			-- 에러메시지
+			, ERROR_LINE()				-- 에러라인
+			, GETDATE()	
+
+			SET @RETURN_CODE = -1 -- 저장실패
+			SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1')
+		END
+	END CATCH
+	
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+END
+
+GO
+

@@ -1,0 +1,739 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.06.27
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 
+-- 실행문 : 
+-- 템플릿 별 필요한 param JSON 데이터 보내기
+EXEC PR_ALIMTALK_INFO_LIST 'ORD_07','[{"ORD_NO":"2240904006"}]' 
+EXEC PR_ALIMTALK_INFO_LIST 'ORD_04','[{"ORD_NO":"2240628004"}]' 
+EXEC PR_ALIMTALK_INFO_LIST 'ORD_03','[{"ORD_NO":"2240702012"}]' 
+EXEC PR_ALIMTALK_INFO_LIST 'PUR_01','[{"ORD_NO":"1240703001"}]' 
+EXEC PR_ALIMTALK_INFO_LIST 'TRNS_01','[{"ORD_NO":"1240703006"}]' 
+EXEC PR_ALIMTALK_INFO_LIST 'TRNS_02','[{"ORD_NO":"1240703008"}]' 
+EXEC PR_ALIMTALK_INFO_LIST 'PRD_02','[{"PROD_DT":"20240703", "SCAN_CODE": "210004"}]' 
+EXEC PR_ALIMTALK_INFO_LIST 'PA_02','[{"VEN_CODE":""UM20127""}]' 
+EXEC PR_ALIMTALK_INFO_LIST 'TRNS_03','[{"ORD_NO":"2240731008"}]' 
+EXEC PR_ALIMTALK_INFO_LIST 'TRNS_04','[{"ORD_NO":"2240731008"}]'
+EXEC PR_ALIMTALK_INFO_LIST 'IM_01','[{"PO_NO":"PO240501"}]'
+EXEC PR_ALIMTALK_INFO_LIST 'ORD_05','[{"ORD_NO":"2240723002"},{"ORD_NO":"2240626003"}]' 
+EXEC PR_ALIMTALK_INFO_LIST 'VEN_01','[{"VEN_CODE":"UM29997"}]' 
+*/
+CREATE PROCEDURE [dbo].[PR_ALIMTALK_INFO_LIST]
+	@P_template_code		NVARCHAR(30),		-- 템플릿코드
+	@P_JSONDT				VARCHAR(1000) = ''  -- 조회조건
+AS 
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	
+    DECLARE @RETURN_JSON NVARCHAR(MAX);
+	BEGIN TRY 
+		/***** 주문확정,취소 *****/
+		IF @P_template_code = 'ORD_07' OR @P_template_code = 'ORD_06'
+		BEGIN
+			/*주문번호 테이블 생성*/
+			DECLARE @ORD_NO_TBL_1 TABLE (
+			ORD_NO NVARCHAR(11)
+			)
+
+			INSERT INTO @ORD_NO_TBL_1
+				SELECT ORD_NO
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( ORD_NO NVARCHAR(11) '$.ORD_NO' );
+
+			/*데이터 조회*/
+			WITH PO_ORDER_DTL_PIVOT AS (
+				SELECT
+					ORD_NO,
+					MAX(CASE WHEN SEQ = 1 THEN 제품정보 ELSE '' END) AS 제품정보_1,
+					MAX(CASE WHEN SEQ = 2 THEN 제품정보 ELSE '' END) AS 제품정보_2,
+					MAX(CASE WHEN SEQ = 3 THEN 제품정보 ELSE '' END) AS 제품정보_3,
+					MAX(CASE WHEN SEQ = 4 THEN 제품정보 ELSE '' END) AS 제품정보_4
+				FROM (
+					SELECT
+						A.ORD_NO,
+						B.SEQ,
+						CONCAT(C.ITM_NAME,' | ', FORMAT(CAST(B.ORD_QTY AS INT), 'N0'), CASE WHEN C.WEIGHT_GB = 'WT' THEN ' KG' ELSE ' EA' END) AS 제품정보
+					FROM @ORD_NO_TBL_1 AS A
+					INNER JOIN PO_ORDER_DTL AS B ON A.ORD_NO = B.ORD_NO
+					INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+				) AS SourceTable
+				GROUP BY ORD_NO
+			)
+			SELECT @RETURN_JSON = (
+				SELECT
+					'\n' + A.ORD_NO AS '주문번호',
+					'\n' + E.VEN_NAME AS '거래처명',
+					'\n' + FORMAT(CAST(B.DELIVERY_REQ_DT AS DATE), 'yyyy-MM-dd') AS '출고요청일',
+					'\n' + ISNULL(F.DELIVERY_NAME, '') AS '배송지명',
+					'\n' + ISNULL(B.R_ADDR, '') AS '주소',
+					'\n' + ISNULL(B.R_ADDR_DTL, '') AS '상세주소',
+					'\n' + (CONCAT_WS('|', IIF(B.DOCUMENT_REQ_1 IS NULL, NULL, G.CD_NM1),
+								  IIF(B.DOCUMENT_REQ_2 IS NULL, NULL, G.CD_NM2),
+								  IIF(B.DOCUMENT_REQ_3 IS NULL, NULL, G.CD_NM3),
+								  IIF(B.DOCUMENT_REQ_4 IS NULL, NULL, G.CD_NM4))
+					 ) AS '첨부서류',
+					ISNULL(C.제품정보_1, '') AS '제품정보_1',
+					ISNULL(C.제품정보_2, '') AS '제품정보_2',
+					ISNULL(C.제품정보_3, '') AS '제품정보_3',
+					ISNULL(C.제품정보_4, '') AS '제품정보_4'
+				FROM @ORD_NO_TBL_1 AS A
+					INNER JOIN PO_ORDER_HDR AS B ON A.ORD_NO = B.ORD_NO
+					INNER JOIN PO_ORDER_DTL_PIVOT AS C ON B.ORD_NO = C.ORD_NO
+					INNER JOIN CD_PARTNER_MST AS E ON B.VEN_CODE = E.VEN_CODE
+					LEFT OUTER JOIN CD_PARTNER_DELIVERY AS F ON B.VEN_CODE = F.VEN_CODE AND B.DELIVERY_CODE = F.DELIVERY_CODE
+					LEFT OUTER JOIN VIEW_COMM_CD_MST_DOCUMENT AS G ON (
+						B.DOCUMENT_REQ_1 = G.CD_ID1 OR
+						B.DOCUMENT_REQ_2 = G.CD_ID2 OR
+						B.DOCUMENT_REQ_3 = G.CD_ID3 OR
+						B.DOCUMENT_REQ_4 = G.CD_ID4
+					)
+				FOR JSON PATH
+			)
+
+		END
+		/***** 출고서류 등록 *****/
+		ELSE IF @P_template_code = 'ORD_03'
+		BEGIN
+			/*주문번호 테이블 생성*/
+			DECLARE @ORD_NO_TBL_2 TABLE (
+			ORD_NO NVARCHAR(11)
+			)
+
+			INSERT INTO @ORD_NO_TBL_2
+				SELECT ORD_NO
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( ORD_NO NVARCHAR(11) '$.ORD_NO' );
+
+			/*데이터 조회*/
+			SELECT @RETURN_JSON = (
+				SELECT
+					'\n' + A.ORD_NO AS '주문번호',
+					'\n' + E.VEN_NAME AS '거래처명',
+					'\n' + FORMAT(CAST(B.DELIVERY_REQ_DT AS DATE), 'yyyy-MM-dd') AS '출고요청일',
+					'\n' + ISNULL(F.DELIVERY_NAME, '') AS '배송지명',
+					'\n' + ISNULL(B.R_ADDR, '') AS '주소',
+					'\n' + ISNULL(B.R_ADDR_DTL, '') AS '상세주소',
+					'\n' + (CONCAT_WS('|', IIF(B.DOCUMENT_REQ_1 IS NULL, NULL, G.CD_NM1),
+								  IIF(B.DOCUMENT_REQ_2 IS NULL, NULL, G.CD_NM2),
+								  IIF(B.DOCUMENT_REQ_3 IS NULL, NULL, G.CD_NM3),
+								  IIF(B.DOCUMENT_REQ_4 IS NULL, NULL, G.CD_NM4))
+					 ) AS '첨부서류',
+					CAST(C.DOCUMENT_CNT AS VARCHAR) AS '등록건수'
+				FROM @ORD_NO_TBL_2 AS A
+					INNER JOIN PO_ORDER_HDR AS B ON A.ORD_NO = B.ORD_NO
+					INNER JOIN (
+								SELECT ORD_NO, COUNT(1) AS DOCUMENT_CNT
+								  FROM PO_DOCUMENT_REQ 
+								 GROUP BY ORD_NO) AS C ON B.ORD_NO = C.ORD_NO
+					INNER JOIN CD_PARTNER_MST AS E ON B.VEN_CODE = E.VEN_CODE
+					LEFT OUTER JOIN CD_PARTNER_DELIVERY AS F ON B.VEN_CODE = F.VEN_CODE AND B.DELIVERY_CODE = F.DELIVERY_CODE
+					LEFT OUTER JOIN VIEW_COMM_CD_MST_DOCUMENT AS G ON (
+						B.DOCUMENT_REQ_1 = G.CD_ID1 OR
+						B.DOCUMENT_REQ_2 = G.CD_ID2 OR
+						B.DOCUMENT_REQ_3 = G.CD_ID3 OR
+						B.DOCUMENT_REQ_4 = G.CD_ID4
+					)
+				FOR JSON PATH
+			)
+
+		END
+		/***** 발주확정,취소 *****/
+		ELSE IF @P_template_code = 'PUR_03' OR @P_template_code = 'PUR_04' -- 발주확정/취소
+		BEGIN
+		
+			/*발주번호 테이블 생성*/
+			DECLARE @ORD_NO_TBL_3 TABLE (
+			ORD_NO NVARCHAR(11)
+			)
+
+			INSERT INTO @ORD_NO_TBL_3
+				SELECT ORD_NO
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( ORD_NO NVARCHAR(11) '$.ORD_NO' );
+
+			/*데이터 조회*/
+			WITH PO_PURCHASE_DTL_PIVOT AS (
+				SELECT
+					ORD_NO,
+					MAX(CASE WHEN SEQ = 1 THEN 제품정보 ELSE '' END) AS 제품정보_1,
+					MAX(CASE WHEN SEQ = 2 THEN 제품정보 ELSE '' END) AS 제품정보_2,
+					MAX(CASE WHEN SEQ = 3 THEN 제품정보 ELSE '' END) AS 제품정보_3,
+					MAX(CASE WHEN SEQ = 4 THEN 제품정보 ELSE '' END) AS 제품정보_4
+				FROM (
+					SELECT
+						A.ORD_NO,
+						B.SEQ,
+						CONCAT(C.ITM_NAME,' | ', FORMAT(CAST(B.ORD_QTY AS INT), 'N0'), CASE WHEN C.WEIGHT_GB = 'WT' THEN ' KG' ELSE ' EA' END) AS 제품정보
+					FROM @ORD_NO_TBL_3 AS A
+					INNER JOIN PO_PURCHASE_DTL AS B ON A.ORD_NO = B.ORD_NO
+					INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+				) AS SourceTable
+				GROUP BY ORD_NO
+			)
+			SELECT @RETURN_JSON = (
+				SELECT
+					'\n' + A.ORD_NO AS '주문번호',
+					'\n' + E.VEN_NAME AS '거래처명',
+					ISNULL(C.제품정보_1, '') AS '제품정보_1',
+					ISNULL(C.제품정보_2, '') AS '제품정보_2',
+					ISNULL(C.제품정보_3, '') AS '제품정보_3',
+					ISNULL(C.제품정보_4, '') AS '제품정보_4'
+				FROM @ORD_NO_TBL_3 AS A
+					INNER JOIN PO_PURCHASE_HDR AS B ON A.ORD_NO = B.ORD_NO
+					INNER JOIN PO_PURCHASE_DTL_PIVOT AS C ON B.ORD_NO = C.ORD_NO
+					INNER JOIN CD_PARTNER_MST AS E ON B.VEN_CODE = E.VEN_CODE
+				FOR JSON PATH
+			)
+
+		END
+		/***** 배차요청 *****/
+		ELSE IF @P_template_code = 'TRNS_05'
+		BEGIN
+			
+			/*주문번호 테이블 생성*/
+			DECLARE @ORD_NO_TBL_4 TABLE (
+			ORD_NO NVARCHAR(11)
+			)
+
+			INSERT INTO @ORD_NO_TBL_4
+				SELECT ORD_NO
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( ORD_NO NVARCHAR(11) '$.ORD_NO' )
+				WHERE LEFT(ORD_NO, 1) = '2'
+
+			/*발주번호 테이블 생성*/
+			DECLARE @ORD_NO_TBL_5 TABLE (
+			ORD_NO NVARCHAR(11)
+			)
+
+			INSERT INTO @ORD_NO_TBL_5
+				SELECT ORD_NO
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( ORD_NO NVARCHAR(11) '$.ORD_NO' )
+				WHERE LEFT(ORD_NO, 1) = '1';
+
+			/*주문데이터 조회*/
+			IF EXISTS (SELECT 1 FROM @ORD_NO_TBL_4)
+			BEGIN
+				WITH PO_ORDER_DTL_PIVOT AS (
+					SELECT
+						ORD_NO,
+						MAX(CASE WHEN SEQ = 1 THEN 제품정보 ELSE '' END) AS 제품정보_1,
+						MAX(CASE WHEN SEQ = 2 THEN 제품정보 ELSE '' END) AS 제품정보_2,
+						MAX(CASE WHEN SEQ = 3 THEN 제품정보 ELSE '' END) AS 제품정보_3,
+						MAX(CASE WHEN SEQ = 4 THEN 제품정보 ELSE '' END) AS 제품정보_4
+					FROM (
+						SELECT
+							A.ORD_NO,
+							B.SEQ,
+							CONCAT(C.ITM_NAME,' | ', FORMAT(CAST(B.ORD_QTY AS INT), 'N0'), CASE WHEN C.WEIGHT_GB = 'WT' THEN ' KG' ELSE ' EA' END) AS 제품정보
+						FROM @ORD_NO_TBL_4 AS A
+						INNER JOIN PO_ORDER_DTL AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+					) AS SourceTable
+					GROUP BY ORD_NO
+				)
+				SELECT @RETURN_JSON = (
+					SELECT
+						'\n' + A.ORD_NO AS '수발주번호',
+						'\n' + E.VEN_NAME AS '거래처명',
+						'\n' + FORMAT(CAST(B.DELIVERY_REQ_DT AS DATE), 'yyyy-MM-dd') AS '출고요청일',
+						'\n' + ISNULL(F.DELIVERY_NAME, '') AS '배송지명',
+						'\n' + ISNULL(B.R_ADDR, '') AS '주소',
+						'\n' + ISNULL(B.R_ADDR_DTL, '') AS '상세주소',
+						'\n' + (CONCAT_WS('|', IIF(B.DOCUMENT_REQ_1 IS NULL, NULL, G.CD_NM1),
+								  IIF(B.DOCUMENT_REQ_2 IS NULL, NULL, G.CD_NM2),
+								  IIF(B.DOCUMENT_REQ_3 IS NULL, NULL, G.CD_NM3),
+								  IIF(B.DOCUMENT_REQ_4 IS NULL, NULL, G.CD_NM4))
+						) AS '첨부서류',
+						ISNULL(C.제품정보_1, '') AS '제품정보_1',
+						ISNULL(C.제품정보_2, '') AS '제품정보_2',
+						ISNULL(C.제품정보_3, '') AS '제품정보_3',
+						ISNULL(C.제품정보_4, '') AS '제품정보_4'
+					FROM @ORD_NO_TBL_4 AS A
+						INNER JOIN PO_ORDER_HDR AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN PO_ORDER_DTL_PIVOT AS C ON B.ORD_NO = C.ORD_NO
+						INNER JOIN CD_PARTNER_MST AS E ON B.VEN_CODE = E.VEN_CODE
+						LEFT OUTER JOIN CD_PARTNER_DELIVERY AS F ON B.VEN_CODE = F.VEN_CODE AND B.DELIVERY_CODE = F.DELIVERY_CODE
+						LEFT OUTER JOIN VIEW_COMM_CD_MST_DOCUMENT AS G ON (
+							B.DOCUMENT_REQ_1 = G.CD_ID1 OR
+							B.DOCUMENT_REQ_2 = G.CD_ID2 OR
+							B.DOCUMENT_REQ_3 = G.CD_ID3 OR
+							B.DOCUMENT_REQ_4 = G.CD_ID4
+						)
+					FOR JSON PATH
+				) 
+			END
+
+			/*발주데이터 조회*/
+			IF EXISTS (SELECT 1 FROM @ORD_NO_TBL_5)
+			BEGIN
+				WITH PO_PURCHASE_DTL_PIVOT AS (
+					SELECT
+						ORD_NO,
+						MAX(CASE WHEN SEQ = 1 THEN 제품정보 ELSE '' END) AS 제품정보_1,
+						MAX(CASE WHEN SEQ = 2 THEN 제품정보 ELSE '' END) AS 제품정보_2,
+						MAX(CASE WHEN SEQ = 3 THEN 제품정보 ELSE '' END) AS 제품정보_3,
+						MAX(CASE WHEN SEQ = 4 THEN 제품정보 ELSE '' END) AS 제품정보_4
+					FROM (
+						SELECT
+							A.ORD_NO,
+							B.SEQ,
+							CONCAT(C.ITM_NAME,' | ', FORMAT(CAST(B.ORD_QTY AS INT), 'N0'), CASE WHEN C.WEIGHT_GB = 'WT' THEN ' KG' ELSE ' EA' END) AS 제품정보
+						FROM @ORD_NO_TBL_5 AS A
+						INNER JOIN PO_PURCHASE_DTL AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+					) AS SourceTable
+					GROUP BY ORD_NO
+				)
+				SELECT @RETURN_JSON = (
+					SELECT
+						'\n' + A.ORD_NO AS '수발주번호',
+						'\n' + E.VEN_NAME AS '거래처명',
+						'\n' + '' AS '출고요청일',
+						'\n' + ISNULL(F.DELIVERY_NAME, '') AS '배송지명',
+						'\n' + ISNULL(B.R_ADDR, '') AS '주소',
+						'\n' + ISNULL(B.R_ADDR_DTL, '') AS '상세주소',
+						'\n' + '' AS '첨부서류',
+						ISNULL(C.제품정보_1, '') AS '제품정보_1',
+						ISNULL(C.제품정보_2, '') AS '제품정보_2',
+						ISNULL(C.제품정보_3, '') AS '제품정보_3',
+						ISNULL(C.제품정보_4, '') AS '제품정보_4'
+					FROM @ORD_NO_TBL_5 AS A
+						INNER JOIN PO_PURCHASE_HDR AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN PO_PURCHASE_DTL_PIVOT AS C ON B.ORD_NO = C.ORD_NO
+						INNER JOIN CD_PARTNER_MST AS E ON B.VEN_CODE = E.VEN_CODE
+						LEFT OUTER JOIN CD_PARTNER_DELIVERY AS F ON B.VEN_CODE = F.VEN_CODE AND B.DELIVERY_CODE = F.DELIVERY_CODE
+					FOR JSON PATH
+					)
+			END
+		END
+		/***** 배차완료 *****/
+		ELSE IF @P_template_code = 'TRNS_06'
+		BEGIN
+			EXEC UMAC_CERT_OPEN_KEY; -- OPEN
+
+			/*주문번호 테이블 생성*/
+			DECLARE @ORD_NO_TBL_6 TABLE (
+			ORD_NO NVARCHAR(11)
+			)
+
+			INSERT INTO @ORD_NO_TBL_6
+				SELECT ORD_NO
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( ORD_NO NVARCHAR(11) '$.ORD_NO' )
+				WHERE LEFT(ORD_NO, 1) = '2'
+	
+			/*발주번호 테이블 생성*/
+			DECLARE @ORD_NO_TBL_7 TABLE (
+			ORD_NO NVARCHAR(11)
+			)
+
+			INSERT INTO @ORD_NO_TBL_7
+				SELECT ORD_NO
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( ORD_NO NVARCHAR(11) '$.ORD_NO' )
+				WHERE LEFT(ORD_NO, 1) = '1';
+
+			/*주문데이터 조회*/
+			IF EXISTS (SELECT 1 FROM @ORD_NO_TBL_6)
+			BEGIN
+				WITH DTL_INFO AS (
+				SELECT A.ORD_NO, 
+					   ISNULL(COUNT(A.ORD_NO),0) AS ITM_CNT, 
+					   MAX(B.SCAN_CODE) AS SCAN_CODE 
+				FROM PO_ORDER_HDR AS A
+				INNER JOIN PO_ORDER_DTL AS B ON A.ORD_NO = B.ORD_NO
+				GROUP BY A.ORD_NO
+				)
+				SELECT @RETURN_JSON = (
+					SELECT
+						'\n' + A.ORD_NO AS '수발주번호',
+						'\n' + FORMAT(CAST(ISNULL(B.DELIVERY_REQ_DT,'') AS DATE), 'yyyy-MM-dd') AS '입출고요청일',
+						'\n' + ISNULL(G.DELIVERY_NAME, '') AS '배송지명',
+						'\n' + ISNULL(B.R_ADDR, '') AS '주소',
+						'\n' + ISNULL(B.R_ADDR_DTL, '') AS '상세주소',
+						'\n' + D.VEN_NAME AS '거래처명',
+						'\n' + (CONCAT_WS('|', IIF(B.DOCUMENT_REQ_1 IS NULL, NULL, H.CD_NM1),
+								  IIF(B.DOCUMENT_REQ_2 IS NULL, NULL, H.CD_NM2),
+								  IIF(B.DOCUMENT_REQ_3 IS NULL, NULL, H.CD_NM3),
+								  IIF(B.DOCUMENT_REQ_4 IS NULL, NULL, H.CD_NM4))
+						) AS '첨부서류',
+						'\n' + F.CAR_NO AS '차량번호',
+						'\n' + CASE WHEN LEN(DBO.GET_DECRYPT(F.MOBIL_NO)) = 11 
+									THEN LEFT(DBO.GET_DECRYPT(F.MOBIL_NO),3) + '-' + SUBSTRING(DBO.GET_DECRYPT(F.MOBIL_NO), 4,4) + '-' +RIGHT(DBO.GET_DECRYPT(F.MOBIL_NO),4) 
+									ELSE DBO.GET_DECRYPT(F.MOBIL_NO) END AS '기사번호',
+						'\n' + I.CD_NM AS '차량구분',
+						CONCAT('\n', DTL.PLT, ' PLT') AS 'PLT수량',
+						'\n' + E.ITM_NAME + (CASE WHEN C.ITM_CNT > 1 THEN ' 외 ' + CAST(C.ITM_CNT - 1 AS VARCHAR) + '건' ELSE '' END) AS '제품정보',
+						'\n' + F.ENTRANCE_TIME AS '입차시간'
+					FROM @ORD_NO_TBL_6 AS A
+						INNER JOIN PO_ORDER_HDR AS B ON A.ORD_NO = B.ORD_NO 
+						INNER JOIN DTL_INFO AS C ON A.ORD_NO = C.ORD_NO
+						INNER JOIN (
+								SELECT ORD_NO, ISNULL(SUM(CAST(ISNULL(CEILING(DTL.ORD_QTY / B.PLT_BOX_QTY), 0) AS INT)),0) AS 'PLT'
+								FROM PO_ORDER_DTL AS DTL
+								INNER JOIN CD_PRODUCT_CMN AS B ON DTL.SCAN_CODE = B.SCAN_CODE
+								GROUP BY ORD_NO
+							) AS DTL ON A.ORD_NO = DTL.ORD_NO
+						INNER JOIN CD_PARTNER_MST AS D ON B.VEN_CODE = D.VEN_CODE
+						INNER JOIN CD_PRODUCT_CMN AS E ON C.SCAN_CODE = E.SCAN_CODE	
+						INNER JOIN PO_SCALE AS F ON A.ORD_NO = F.ORD_NO
+						LEFT OUTER JOIN CD_PARTNER_DELIVERY AS G ON B.VEN_CODE = G.VEN_CODE AND B.DELIVERY_CODE = G.DELIVERY_CODE
+						LEFT OUTER JOIN VIEW_COMM_CD_MST_DOCUMENT AS H ON (
+							B.DOCUMENT_REQ_1 = H.CD_ID1 OR
+							B.DOCUMENT_REQ_2 = H.CD_ID2 OR
+							B.DOCUMENT_REQ_3 = H.CD_ID3 OR
+							B.DOCUMENT_REQ_4 = H.CD_ID4
+						)
+						LEFT OUTER JOIN TBL_COMM_CD_MST AS I ON I.CD_CL = 'CAR_GB' AND F.CAR_GB = I.CD_ID
+						FOR JSON PATH
+				)
+			END
+
+			/*발주데이터 조회*/
+			IF EXISTS (SELECT 1 FROM @ORD_NO_TBL_7)
+			BEGIN
+				WITH DTL_INFO AS (
+				SELECT A.ORD_NO, 
+					   ISNULL(COUNT(A.ORD_NO),0) AS ITM_CNT, 
+					   MAX(B.SCAN_CODE) AS SCAN_CODE 
+				FROM PO_PURCHASE_HDR AS A
+				INNER JOIN PO_PURCHASE_DTL AS B ON A.ORD_NO = B.ORD_NO
+				GROUP BY A.ORD_NO
+				)
+				SELECT @RETURN_JSON = (
+					SELECT
+						'\n' + A.ORD_NO AS '수발주번호',
+						'\n' + FORMAT(CAST(ISNULL(B.DELIVERY_EXP_DT, '') AS DATE), 'yyyy-MM-dd') AS '입출고요청일',
+						'\n' + ISNULL(G.DELIVERY_NAME, '') AS '배송지명',
+						'\n' + ISNULL(B.R_ADDR, '') AS '주소',
+						'\n' + ISNULL(B.R_ADDR_DTL, '') AS '상세주소',
+						'\n' + D.VEN_NAME AS '거래처명', 
+						'\n' + '' AS '첨부서류',
+						'\n' + F.CAR_NO AS '차량번호',
+						'\n' + CASE WHEN LEN(DBO.GET_DECRYPT(F.MOBIL_NO)) = 11 
+									THEN LEFT(DBO.GET_DECRYPT(F.MOBIL_NO),3) + '-' + SUBSTRING(DBO.GET_DECRYPT(F.MOBIL_NO), 3,4) + '-' +RIGHT(DBO.GET_DECRYPT(F.MOBIL_NO),4) 
+									ELSE DBO.GET_DECRYPT(F.MOBIL_NO) END AS '기사번호',
+						'\n' + H.CD_NM AS '차량구분',
+						'\n' + '' AS 'PLT수량',
+						'\n' + E.ITM_NAME + (CASE WHEN C.ITM_CNT > 1 THEN ' 외 ' + CAST(C.ITM_CNT - 1 AS VARCHAR) + '건' ELSE '' END) AS '제품정보',
+						'\n' + F.ENTRANCE_TIME AS '입차시간'
+					FROM @ORD_NO_TBL_7 AS A
+						INNER JOIN PO_PURCHASE_HDR AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN DTL_INFO AS C ON A.ORD_NO = C.ORD_NO
+						INNER JOIN CD_PARTNER_MST AS D ON B.VEN_CODE = D.VEN_CODE
+						INNER JOIN CD_PRODUCT_CMN AS E ON C.SCAN_CODE = E.SCAN_CODE	
+						INNER JOIN PO_SCALE AS F ON A.ORD_NO = F.ORD_NO
+						LEFT OUTER JOIN CD_PARTNER_DELIVERY AS G ON B.VEN_CODE = G.VEN_CODE AND B.DELIVERY_CODE = G.DELIVERY_CODE
+						LEFT OUTER JOIN TBL_COMM_CD_MST AS H ON H.CD_CL = 'CAR_GB' AND F.CAR_GB = H.CD_ID
+					FOR JSON PATH
+				)
+				
+			END
+			EXEC UMAC_CERT_CLOSE_KEY; -- CLOSE
+
+		END
+		/***** 생산재고등록 *****/
+		ELSE IF @P_template_code = 'PRD_03'
+		BEGIN
+			/*생산일자, 제품코드 테이블 생성*/
+			DECLARE @PRD_DATA_TBL TABLE (
+				PROD_DT NVARCHAR(8),
+				SCAN_CODE NVARCHAR(14)
+			)
+
+			INSERT INTO @PRD_DATA_TBL
+				SELECT PROD_DT, SCAN_CODE
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( 
+							PROD_DT NVARCHAR(8) '$.PROD_DT',
+							SCAN_CODE NVARCHAR(14) '$.SCAN_CODE'
+						  )
+
+			/*생산 데이터 조회*/
+			SELECT @RETURN_JSON = (
+				SELECT 
+					'\n' + C.ITM_NAME AS '제품명',
+					'\n' + FORMAT(CAST(B.PROD_DT AS DATE), 'yyyy-MM-dd') AS '생산일자',
+					'\n' + CASE WHEN B.EXPIRATION_DT <> '99999999' THEN FORMAT(TRY_CONVERT(DATE, B.EXPIRATION_DT,112), 'yyyy-MM-dd') ELSE '0' END AS '소비기한',
+					'\n' + B.LOT_NO AS 'LOT번호',
+					'\n' + CONCAT(FORMAT(CAST(B.PROD_APP_QTY AS INT), 'N0') , CASE WHEN C.WEIGHT_GB = 'WT' THEN ' KG' ELSE ' EA' END) AS '생산수량'
+				FROM @PRD_DATA_TBL AS A
+				INNER JOIN CD_LOT_MST AS B ON A.PROD_DT = B.PROD_DT AND A.SCAN_CODE = B.SCAN_CODE
+				INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+				FOR JSON PATH
+			)
+		END
+		/***** 입금요청 *****/
+		--EXEC PR_ALIMTALK_INFO_LIST 'PA_02','[{"VEN_CODE":"UM20128", "BANK_CODE": "06"}]' 
+		ELSE IF @P_template_code = 'PA_01' OR @P_template_code = 'PA_02'
+		BEGIN
+			EXEC UMAC_CERT_OPEN_KEY; -- OPEN
+
+			/*거래처코드 테이블 생성*/
+			DECLARE @PA_DATA_TBL TABLE (
+				VEN_CODE NVARCHAR(7),
+				BANK_CODE NVARCHAR(3)
+			)
+			INSERT INTO @PA_DATA_TBL
+				SELECT VEN_CODE, BANK_CODE
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( 
+							VEN_CODE NVARCHAR(7) '$.VEN_CODE',
+							BANK_CODE NVARCHAR(3) '$.BANK_CODE'
+						  )
+			;
+						   
+			WITH mobleNoList AS (
+				SELECT 
+				DBO.GET_DECRYPT(B.MOBIL_NO) AS 'to'
+				FROM @PA_DATA_TBL AS A
+				LEFT OUTER JOIN CD_PARTNER_EMP AS B ON B.VEN_CODE = A.VEN_CODE
+				WHERE B.ALIMTALK_YN = 'Y'
+			)
+			, bankNameInfo AS (
+				SELECT 
+				B.CD_NM AS 'BANK_NAME'
+				FROM @PA_DATA_TBL AS A
+				INNER JOIN TBL_COMM_CD_MST AS B ON B.CD_CL = 'TOSS_BANK' AND A.BANK_CODE = B.CD_ID
+			)
+			, venNameInfo AS (
+				SELECT 
+				B.VEN_NAME
+				FROM @PA_DATA_TBL AS A
+				INNER JOIN CD_PARTNER_MST AS B ON A.VEN_CODE = B.VEN_CODE
+			)
+
+			SELECT 
+				@RETURN_JSON = 
+				(SELECT
+					JSON_QUERY(
+						(SELECT [to] FROM mobleNoList FOR JSON PATH)
+					) AS toList,
+					(SELECT BANK_NAME FROM bankNameInfo) AS BANK_NAME,
+					(SELECT VEN_NAME FROM venNameInfo) AS VEN_NAME
+				FOR JSON PATH)
+
+			EXEC UMAC_CERT_CLOSE_KEY; -- CLOSE
+		END
+		/***** 입차완료, 출차완료 *****/
+		ELSE IF @P_template_code = 'TRNS_03' OR @P_template_code = 'TRNS_04'
+		BEGIN
+			EXEC UMAC_CERT_OPEN_KEY; -- OPEN
+			/*주문번호 테이블 생성*/
+			DECLARE @ORD_NO_TBL_8 TABLE (
+				ORD_NO NVARCHAR(11)
+			)
+
+			INSERT INTO @ORD_NO_TBL_8
+				SELECT ORD_NO
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( ORD_NO NVARCHAR(11) '$.ORD_NO' )
+				WHERE LEFT(ORD_NO, 1) = '2'
+
+			/*발주번호 테이블 생성*/
+			DECLARE @ORD_NO_TBL_9 TABLE (
+				ORD_NO NVARCHAR(11)
+			)
+
+			INSERT INTO @ORD_NO_TBL_9
+				SELECT ORD_NO
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( ORD_NO NVARCHAR(11) '$.ORD_NO' )
+				WHERE LEFT(ORD_NO, 1) = '1';
+
+			/*주문데이터 조회*/
+			IF EXISTS (SELECT 1 FROM @ORD_NO_TBL_8)
+			BEGIN
+				 
+				SELECT @RETURN_JSON = (
+					SELECT
+						--'\n' + ISNULL(F.CAR_NO, '') AS '차량번호',
+						CASE WHEN F.CAR_NO IS NULL THEN '' ELSE '\n' + F.CAR_NO END AS '차량번호',
+						CASE WHEN LEN(DBO.GET_DECRYPT(F.MOBIL_NO)) = 11 
+							 THEN '\n' + LEFT(DBO.GET_DECRYPT(F.MOBIL_NO),3) + '-' + SUBSTRING(DBO.GET_DECRYPT(F.MOBIL_NO), 3,4) + '-' +RIGHT(DBO.GET_DECRYPT(F.MOBIL_NO),4) 
+							 ELSE '' END AS '기사번호',
+						'\n' + C.VEN_NAME AS '거래처명',
+						'\n' + ISNULL(D.DELIVERY_NAME, '') AS '배송지명',
+						'\n' + ISNULL(E.TRANS_SECTION, '') AS '운송구간',
+						--'\n' + ISNULL(G.CD_NM, '') AS '차량구분'
+						CASE WHEN G.CD_NM IS NULL THEN '' ELSE '\n' + G.CD_NM END AS '차량구분'
+					FROM @ORD_NO_TBL_8 AS A
+						INNER JOIN PO_ORDER_HDR AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN CD_PARTNER_MST AS C ON B.VEN_CODE = C.VEN_CODE
+						LEFT OUTER JOIN CD_PARTNER_DELIVERY AS D ON B.VEN_CODE = D.VEN_CODE AND B.DELIVERY_CODE = D.DELIVERY_CODE
+						LEFT OUTER JOIN CD_DELIVERY_PRICE AS E ON E.SEQ = B.DELIVERY_PRICE_SEQ
+						INNER JOIN PO_SCALE AS F ON A.ORD_NO = F.ORD_NO
+						LEFT OUTER JOIN TBL_COMM_CD_MST AS G ON G.CD_CL = 'CAR_GB' AND G.CD_ID = F.CAR_GB
+					FOR JSON PATH
+				)
+			END
+
+			/*발주데이터 조회*/
+			IF EXISTS (SELECT 1 FROM @ORD_NO_TBL_9)
+			BEGIN
+				
+				SELECT @RETURN_JSON = (
+					SELECT
+						--'\n' + F.CAR_NO AS '차량번호',
+						CASE WHEN F.CAR_NO IS NULL THEN '' ELSE '\n' + F.CAR_NO END AS '차량번호',
+						'\n' + CASE WHEN LEN(DBO.GET_DECRYPT(F.MOBIL_NO)) = 11 
+									THEN LEFT(DBO.GET_DECRYPT(F.MOBIL_NO),3) + '-' + SUBSTRING(DBO.GET_DECRYPT(F.MOBIL_NO), 3,4) + '-' +RIGHT(DBO.GET_DECRYPT(F.MOBIL_NO),4) 
+									ELSE '' END AS '기사번호',
+						'\n' + C.VEN_NAME AS '거래처명',
+						'\n' + ISNULL(D.DELIVERY_NAME, '') AS '배송지명',
+						'\n' + ISNULL(E.TRANS_SECTION, '') AS '운송구간',
+						--'\n' + G.CD_NM AS '차량구분'
+						CASE WHEN G.CD_NM IS NULL THEN '' ELSE '\n' + G.CD_NM END AS '차량구분'
+					FROM @ORD_NO_TBL_9 AS A
+						INNER JOIN PO_PURCHASE_HDR AS B ON A.ORD_NO = B.ORD_NO
+						INNER JOIN CD_PARTNER_MST AS C ON B.VEN_CODE = C.VEN_CODE
+						LEFT OUTER JOIN CD_PARTNER_DELIVERY AS D ON B.VEN_CODE = D.VEN_CODE AND B.DELIVERY_CODE = D.DELIVERY_CODE
+						LEFT OUTER JOIN CD_DELIVERY_PRICE AS E ON E.SEQ = B.DELIVERY_PRICE_SEQ
+						INNER JOIN PO_SCALE AS F ON A.ORD_NO = F.ORD_NO
+						LEFT OUTER JOIN TBL_COMM_CD_MST AS G ON G.CD_CL = 'CAR_GB' AND G.CD_ID = F.CAR_GB
+					FOR JSON PATH
+				)
+			END
+
+			EXEC UMAC_CERT_CLOSE_KEY; -- CLOSE
+		END
+		/***** 수입발주등록 *****/
+		ELSE IF @P_template_code = 'IM_02'
+		BEGIN
+			/*PO번호 테이블 생성*/
+			DECLARE @PO_NO_TBL TABLE (
+				PO_NO NVARCHAR(15)
+			)
+
+			INSERT INTO @PO_NO_TBL
+				SELECT PO_NO
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( PO_NO NVARCHAR(15) '$.PO_NO' );
+
+			/* 수입발주데이터 조회*/
+			WITH IM_ORDER_DTL_PIVOT AS (
+				SELECT
+					PO_NO,
+					MAX(CASE WHEN SEQ = 1 THEN 제품정보 ELSE '' END) AS 제품정보_1,
+					MAX(CASE WHEN SEQ = 2 THEN 제품정보 ELSE '' END) AS 제품정보_2,
+					MAX(CASE WHEN SEQ = 3 THEN 제품정보 ELSE '' END) AS 제품정보_3,
+					MAX(CASE WHEN SEQ = 4 THEN 제품정보 ELSE '' END) AS 제품정보_4
+				FROM (
+					SELECT
+						A.PO_NO,
+						B.SEQ,
+						CONCAT(C.ITM_NAME,' | ', FORMAT(CAST(B.ORD_QTY AS INT), 'N0'), ' TON') AS 제품정보
+					FROM @PO_NO_TBL AS A
+					INNER JOIN IM_ORDER_DTL AS B ON A.PO_NO = B.PO_NO
+					INNER JOIN CD_PRODUCT_CMN AS C ON B.ITM_CODE = C.ITM_CODE
+				) AS SourceTable
+				GROUP BY PO_NO
+			)
+			SELECT @RETURN_JSON = (
+				SELECT
+					'\n' + A.PO_NO AS 'PO번호',
+					'\n' + B.PO_NAME AS 'PO명',
+					'\n' + CONCAT(FORMAT(CAST(B.INVOICE_AMT AS INT), 'N0'), '원') AS '송장금액',
+					'\n' + B.CURRENCY_TYPE AS '거래환종',
+					'\n' + B.INCOTERMS AS '인도조건',
+					'\n' + D.VEN_NAME AS '수입업체',
+					ISNULL(C.제품정보_1, '') AS '제품정보_1',
+					ISNULL(C.제품정보_2, '') AS '제품정보_2',
+					ISNULL(C.제품정보_3, '') AS '제품정보_3',
+					ISNULL(C.제품정보_4, '') AS '제품정보_4'
+				FROM @PO_NO_TBL AS A
+					INNER JOIN IM_ORDER_HDR AS B ON A.PO_NO = B.PO_NO
+					INNER JOIN IM_ORDER_DTL_PIVOT AS C ON B.PO_NO = C.PO_NO
+					INNER JOIN CD_PARTNER_MST AS D ON B.VEN_CODE = D.VEN_CODE
+				FOR JSON PATH
+			)
+		END 
+		/***** 신규거래처 등록 *****/
+		ELSE IF @P_template_code = 'VEN_01'
+		BEGIN
+			/*주문번호 테이블 생성*/
+			DECLARE @VEN_CODE_TBL TABLE (
+			VEN_CODE NVARCHAR(7)
+			)
+
+			INSERT INTO @VEN_CODE_TBL
+				SELECT VEN_CODE
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( VEN_CODE NVARCHAR(11) '$.VEN_CODE' );
+
+			/*데이터 조회*/
+			SELECT @RETURN_JSON = (
+				SELECT
+					'\n' + B.VEN_CODE AS '거래처코드',
+					'\n' + E.CD_NM AS '매출입',
+					'\n' + B.VEN_NAME AS '거래처명',
+					'\n' + ISNULL(C.USER_NM, '') AS '담당자',
+					'\n' + B.IEMP_ID AS '등록자',
+					'\n' + ISNULL(B.BUSI_NO, '') AS '사업자번호',
+					'\n' + ISNULL(C.MAIL_ID, '') AS '메일주소'
+				FROM @VEN_CODE_TBL AS A
+					INNER JOIN CD_PARTNER_MST AS B ON A.VEN_CODE = B.VEN_CODE
+					LEFT OUTER JOIN CD_PARTNER_EMP AS C ON B.VEN_CODE = C.VEN_CODE AND C.ASGNR = 'Y'
+					LEFT OUTER JOIN TBL_USER_MST AS D ON B.MGNT_USER_ID = D.[USER_ID]
+					INNER JOIN TBL_COMM_CD_MST AS E ON E.CD_CL = 'VEN_GB' AND E.CD_ID = B.VEN_GB
+				FOR JSON PATH
+			)
+
+		END
+		/***** 일반계좌 입금처리 *****/
+		ELSE IF @P_template_code = 'PA_04'
+		BEGIN
+			/*CMS 시퀀스 테이블 생성*/
+			DECLARE @CMS_SEQ_TBL TABLE (
+				CMS_SEQ INT
+			)
+
+			INSERT INTO @CMS_SEQ_TBL
+				SELECT CMS_SEQ
+				FROM OPENJSON ( @P_JSONDT )   
+					 WITH ( CMS_SEQ INT '$.CMS_SEQ' );
+
+			/*데이터 조회*/
+			SELECT @RETURN_JSON = (
+				SELECT '\n' + B.VEN_CODE AS '거래처코드'
+					 , '\n' + C.VEN_NAME AS '거래처명'
+					 , '\n' + D.USER_NM AS '등록자'
+					 , '\n' + A.TRSC_DT AS '입금일자'
+					 , '\n' + A.CRYP_CMSV_ACCT_NO AS '입금계좌'
+					 , '\n' + CAST(FORMAT(CAST(A.TX_AMT AS INT), 'N0') AS NVARCHAR(15)) AS '입금금액'
+					 , '\n' + A.RCRD_MTTR_CTT AS '입금자'
+					FROM HCMS_ACCT_TRSC_PTCL AS A
+					INNER JOIN PA_ACCT_DEPOSIT AS B ON A.MOID = B.MOID
+					INNER JOIN CD_PARTNER_MST AS C ON B.VEN_CODE = C.VEN_CODE
+					INNER JOIN TBL_USER_MST AS D ON A.CFM_EMP_ID = D.USER_ID
+					INNER JOIN @CMS_SEQ_TBL AS E ON A.CMS_SEQ = E.CMS_SEQ
+				FOR JSON PATH
+			)
+
+		END
+
+
+	PRINT(@RETURN_JSON)
+	SELECT @RETURN_JSON AS RETURN_JSON
+
+	END TRY
+	
+	BEGIN CATCH		
+	 
+	--에러 로그 테이블 저장
+	INSERT INTO TBL_ERROR_LOG 
+	SELECT ERROR_PROCEDURE()		-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+  
+	END CATCH
+	
+END
+
+GO
+

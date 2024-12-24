@@ -1,0 +1,50 @@
+
+/*
+-- 생성자 :	최수민
+-- 등록일 :	2024.07.29
+-- 설 명  : 
+			앱(API) 재고실사 SCAN_CODE로 LOT 있는지 조회
+-- 수정자 : 최수민
+-- 수정일 : 2024.08.26 제품명 -> 단축제품명 변경
+-- 실행문 : 
+EXEC PR_MO_STOCK_LOT_LIST '120008'
+*/
+CREATE PROCEDURE [dbo].[PR_MO_STOCK_LOT_LIST]
+( 
+	@P_SCAN_CODE		NVARCHAR(14) = ''		-- 상품코드(상세정보 출력)
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	BEGIN TRY 
+
+		SELECT CMN.SCAN_CODE
+			 , CMN.ITM_CODE
+			 , CMN.ITM_NAME
+			 , CMN.ITM_FORM
+			 , CMN.WEIGHT_GB																									--상품 수/중량 구분 코드
+			 , (CASE WHEN CMN.WEIGHT_GB = 'QTY' THEN 'EA' WHEN CMN.WEIGHT_GB = 'WT' THEN 'KG' ELSE '' END) AS  WEIGHT_GB_NM		--상품 수/중량 구분 코드
+			 , (CASE WHEN CMN.ITM_FORM = '3' THEN 0 ELSE ISNULL(IVLOT.CUR_INV_QTY, 0) END) AS CUR_INV_QTY						--현재고수량
+			 , IVLOT.LOT_NO																										--LOT번호
+			 , FORMAT(IVLOT.UDATE, 'yyyyMMdd') AS UDATE
+		  FROM CD_PRODUCT_CMN AS CMN
+		  LEFT OUTER JOIN IV_LOT_STAT AS IVLOT ON CMN.SCAN_CODE = IVLOT.SCAN_CODE
+		 WHERE CMN.SCAN_CODE = @P_SCAN_CODE
+		 ORDER BY IVLOT.UDATE DESC
+					
+	END TRY
+	
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+GO
+

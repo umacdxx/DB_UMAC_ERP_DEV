@@ -1,0 +1,253 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2023.03.15
+-- 설 명  : 배차관리 리스트 조회(수정예정)
+-- 수정자 :	2024.03.26 이동호 - 튜닝(성능이슈 개선) 
+			2024.11.27 강세미 - 배차여부 조건 수정
+			2024.12.02 강세미 - 조회 탭 조건문 추가
+-- 실행문 : 
+EXEC PR_TRANS_MANAGE_LIST '',0,'','20240508','20240508','','','','','','','100','0','TransManageGrid'
+*/
+CREATE PROCEDURE [dbo].[PR_TRANS_MANAGE_LIST]
+( 
+	@P_ORD_NO					NVARCHAR(11) = '',				-- 주문번호
+	@P_IO_GB					INT,							-- 입출고구분
+	@P_VEN_CODE					NVARCHAR(8) = '',				-- 거래처코드
+	@P_S_ORD_DT					NVARCHAR(8) = '',				-- 주문(발주) 조회시작일자
+	@P_E_ORD_DT					NVARCHAR(8) = '',				-- 주문(발주) 조회종료일자
+	@P_S_DELIVERY_REQ_DT		NVARCHAR(8) = '',				-- 출고요청일 조회시작일자
+	@P_E_DELIVERY_REQ_DT		NVARCHAR(8) = '',				-- 출고요청일 조회종료일자
+	@P_SCAN_CODE				NVARCHAR(14) = '',				-- 상품코드
+	@P_ORD_STAT					NVARCHAR(2) = '',				-- 주문상태
+	@P_PUR_STAT					NVARCHAR(2) = '',				-- 발주상태
+	@P_CAR_NO					NVARCHAR(8) = '',				-- 차량번호
+	@P_TRANS_YN					NVARCHAR(1) = '',				-- 배차여부
+	@P_TOT_PAGE_ROW				INT,							-- 한 페이지에 나타나는 row 수
+	@P_PAGE_INDEX				INT, 							-- page row 인덱스
+	@P_ACTIVE_TAB				VARCHAR(20)						-- 활성화된 탭
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+ 
+BEGIN TRY
+EXEC UMAC_CERT_OPEN_KEY; -- OPEN
+
+		-- 리스트 TOTAL COUNT 
+		DECLARE @TOT_CNT INT = 0;
+
+		--# TOTAL COUNT #	
+		WITH TOTAL_CNT AS (
+				SELECT COUNT(A.ORD_NO) AS CNT				
+				FROM PO_ORDER_HDR AS A INNER JOIN (
+							SELECT A.ORD_NO
+								FROM PO_ORDER_HDR AS A	
+									INNER JOIN PO_ORDER_DTL AS B ON A.ORD_NO = B.ORD_NO		
+									INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+									WHERE 1=(CASE WHEN @P_IO_GB = 1 THEN 2 ELSE 1 END)	
+										AND 1 = (CASE WHEN @P_ORD_NO = '' THEN 1 WHEN @P_ORD_NO <> '' AND A.ORD_NO LIKE '%'+@P_ORD_NO+'%' THEN 1 ELSE 0 END ) 
+										AND (@P_S_ORD_DT = '' OR (A.ORD_DT BETWEEN @P_S_ORD_DT AND @P_E_ORD_DT))					 
+										AND 1 = (CASE WHEN @P_VEN_CODE = '' THEN 1 WHEN  @P_VEN_CODE <> '' AND @P_VEN_CODE = A.VEN_CODE THEN 1 ELSE 0 END )
+										AND 1 = (CASE WHEN @P_ORD_STAT = '' THEN 1 WHEN @P_ORD_STAT <> '' AND A.ORD_STAT = @P_ORD_STAT THEN 1 ELSE 0 END )
+										AND (@P_S_DELIVERY_REQ_DT = '' OR (A.DELIVERY_REQ_DT BETWEEN @P_S_DELIVERY_REQ_DT AND @P_E_DELIVERY_REQ_DT))
+										AND 1 = (CASE WHEN @P_SCAN_CODE = '' THEN 1 WHEN @P_SCAN_CODE <> '' AND B.SCAN_CODE = @P_SCAN_CODE THEN 1 ELSE 0 END) 																							
+										AND 1 = (CASE WHEN @P_TRANS_YN = '' THEN 1 WHEN @P_TRANS_YN <> '' AND A.TRANS_YN = @P_TRANS_YN THEN 1 ELSE 0 END)			
+										AND ORD_STAT != '15'
+										AND TRANS_YN != 'N'
+										AND 1 = (CASE WHEN @P_ACTIVE_TAB = 'TransManageGrid' THEN 1															--전체
+													  WHEN @P_ACTIVE_TAB = 'TransManageGrid2' AND B.SCAN_CODE = '120001' THEN 1								--옥배아
+													  WHEN @P_ACTIVE_TAB = 'TransManageGrid3' AND B.SCAN_CODE = '240125' THEN 1								--배아박
+													  WHEN @P_ACTIVE_TAB = 'TransManageGrid4' AND B.SCAN_CODE = '130002' THEN 1								--백토
+													  WHEN @P_ACTIVE_TAB = 'TransManageGrid5' AND C.WEIGHT_GB = 'QTY'	 THEN 1								--일반제품
+													  WHEN @P_ACTIVE_TAB = 'TransManageGrid6' AND C.WEIGHT_GB = 'WT' AND C.SCAN_CODE <> '240125' AND C.SCAN_CODE <> '120001' AND C.SCAN_CODE <> '130002' THEN 1 ELSE 0 END)	--탱크로리(옥배아,배아박,백토 제외)
+
+							GROUP BY A.ORD_NO
+				) B ON A.ORD_NO = B.ORD_NO						
+				UNION ALL
+				SELECT COUNT(*) AS CNT
+				FROM PO_PURCHASE_HDR AS A INNER JOIN (
+						SELECT A.ORD_NO
+							FROM PO_PURCHASE_HDR AS A	
+								INNER JOIN PO_PURCHASE_DTL AS B ON A.ORD_NO = B.ORD_NO
+								INNER JOIN CD_PRODUCT_CMN AS C ON B.SCAN_CODE = C.SCAN_CODE
+								WHERE 1 = (CASE WHEN @P_IO_GB = 2 THEN 2 ELSE 1 END)	
+									AND 1 = (CASE WHEN @P_ORD_NO = '' THEN 1 WHEN @P_ORD_NO <> '' AND A.ORD_NO LIKE '%'+@P_ORD_NO+'%' THEN 1 ELSE 0 END ) 
+									AND 1 = (CASE WHEN @P_VEN_CODE = '' THEN 1 WHEN  @P_VEN_CODE <> '' AND @P_VEN_CODE = A.VEN_CODE THEN 1 ELSE 0 END )
+									AND 1 = (CASE WHEN @P_PUR_STAT = '' THEN 1 WHEN @P_PUR_STAT <> '' AND A.PUR_STAT = @P_PUR_STAT THEN 1 ELSE 0 END )
+									AND 1 = (CASE WHEN @P_SCAN_CODE = '' THEN 1 WHEN @P_SCAN_CODE <> '' AND B.SCAN_CODE = @P_SCAN_CODE THEN 1 ELSE 0 END) 																							
+									AND 1 = (CASE WHEN @P_TRANS_YN = '' THEN 1 WHEN @P_TRANS_YN <> '' AND A.TRANS_YN = @P_TRANS_YN THEN 1 ELSE 0 END)			
+									AND PUR_STAT != '15'
+									AND TRANS_YN != 'N'
+									AND 1 = (CASE WHEN @P_ACTIVE_TAB = 'TransManageGrid' THEN 1															--전체
+												  WHEN @P_ACTIVE_TAB = 'TransManageGrid2' AND B.SCAN_CODE = '120001' THEN 1								--옥배아
+												  WHEN @P_ACTIVE_TAB = 'TransManageGrid3' AND B.SCAN_CODE = '240125' THEN 1								--배아박
+												  WHEN @P_ACTIVE_TAB = 'TransManageGrid4' AND B.SCAN_CODE = '130002' THEN 1								--백토
+												  WHEN @P_ACTIVE_TAB = 'TransManageGrid5' AND C.WEIGHT_GB = 'QTY'	 THEN 1								--일반제품
+												  WHEN @P_ACTIVE_TAB = 'TransManageGrid6' AND C.WEIGHT_GB = 'WT' AND C.SCAN_CODE <> '240125' AND C.SCAN_CODE <> '120001' AND C.SCAN_CODE <> '130002' THEN 1 ELSE 0 END)	--탱크로리(옥배아,배아박,백토 제외)
+						GROUP BY A.ORD_NO
+			) B ON A.ORD_NO = B.ORD_NO	 
+			
+		) 		
+
+		--TOTLA COUNT 변수 SET
+		SELECT @TOT_CNT = SUM(CNT) FROM TOTAL_CNT;
+		
+		-- # LIST #	
+		WITH LIST AS (
+				SELECT 
+					2 AS IO_GB
+					, A.ORD_NO
+					, A.ORD_NO_PARENT
+					, A.ORD_DT
+					, A.DELIVERY_REQ_DT AS IO_GB_REQ_DT
+					, A.ARRIVAL_REQ_DT
+					, A.VEN_CODE
+					, A.R_ADDR
+					, A.R_ADDR_DTL		
+					, A.ORD_STAT AS IO_STAT
+					, A.REMARKS
+					, A.TRANS_YN
+					, B.ITM_CNT
+					, B.SCAN_CODE
+					, A.DELIVERY_CODE
+					, C.TRANS_GB
+					, C.TRANS_SECTION			
+					, D.DELIVERY_NAME
+					, E.CD_NM AS IO_STAT_NM
+					, F.CD_NM AS TRANS_GB_NM
+ 				FROM PO_ORDER_HDR AS A INNER JOIN (
+							SELECT A.ORD_NO, COUNT(A.ORD_NO) AS ITM_CNT, MAX(B.SCAN_CODE) AS SCAN_CODE
+								FROM PO_ORDER_HDR AS A	
+									INNER JOIN PO_ORDER_DTL AS B ON A.ORD_NO = B.ORD_NO
+									WHERE 1=(CASE WHEN @P_IO_GB = 1 THEN 2 ELSE 1 END)	
+										AND 1 = (CASE WHEN @P_ORD_NO = '' THEN 1 WHEN @P_ORD_NO <> '' AND A.ORD_NO LIKE '%'+@P_ORD_NO+'%' THEN 1 ELSE 0 END ) 
+										AND (@P_S_ORD_DT = '' OR (A.ORD_DT BETWEEN @P_S_ORD_DT AND @P_E_ORD_DT))					 				 
+										AND 1 = (CASE WHEN @P_VEN_CODE = '' THEN 1 WHEN  @P_VEN_CODE <> '' AND @P_VEN_CODE = A.VEN_CODE THEN 1 ELSE 0 END )
+										AND 1 = (CASE WHEN @P_ORD_STAT = '' THEN 1 WHEN @P_ORD_STAT <> '' AND A.ORD_STAT = @P_ORD_STAT THEN 1 ELSE 0 END )
+										AND (@P_S_DELIVERY_REQ_DT = '' OR (A.DELIVERY_REQ_DT BETWEEN @P_S_DELIVERY_REQ_DT AND @P_E_DELIVERY_REQ_DT))
+										AND 1 = (CASE WHEN @P_SCAN_CODE = '' THEN 1 WHEN @P_SCAN_CODE <> '' AND B.SCAN_CODE = @P_SCAN_CODE THEN 1 ELSE 0 END) 																								
+									AND 1 = (CASE WHEN @P_TRANS_YN = '' THEN 1 WHEN @P_TRANS_YN <> '' AND A.TRANS_YN = @P_TRANS_YN THEN 1 ELSE 0 END)			
+										AND ORD_STAT != '15' -- 주문취소건 제외
+										AND TRANS_YN != 'N'
+							GROUP BY A.ORD_NO
+				) B ON A.ORD_NO = B.ORD_NO
+				LEFT OUTER JOIN CD_DELIVERY_PRICE AS C ON A.DELIVERY_PRICE_SEQ = C.SEQ
+				LEFT OUTER JOIN CD_PARTNER_DELIVERY AS D ON A.VEN_CODE = D.VEN_CODE AND A.DELIVERY_CODE = D.DELIVERY_CODE 
+				LEFT OUTER JOIN TBL_COMM_CD_MST AS E ON  E.CD_CL = 'ORD_STAT' AND A.ORD_STAT = E.CD_ID
+				LEFT OUTER JOIN TBL_COMM_CD_MST AS F ON  F.CD_CL = 'TRANS_GB' AND C.TRANS_GB = F.CD_ID
+			
+			
+			UNION ALL
+
+				SELECT 
+					1 AS IO_GB
+					, A.ORD_NO		
+					, A.ORD_NO AS ORD_NO_PARENT
+					, A.ORD_DT
+					, A.DELIVERY_EXP_DT AS IO_GB_REQ_DT
+					, '' AS ARRIVAL_REQ_DT
+					, A.VEN_CODE
+					, A.R_ADDR
+					, A.R_ADDR_DTL	
+					, A.PUR_STAT AS IO_STAT
+					, A.REMARKS
+					, A.TRANS_YN
+					, B.ITM_CNT
+					, B.SCAN_CODE
+					, A.DELIVERY_CODE
+					, C.TRANS_GB
+					, C.TRANS_SECTION			
+					, D.DELIVERY_NAME
+					, E.CD_NM AS IO_STAT_NM
+					, F.CD_NM AS TRANS_GB_NM
+				FROM PO_PURCHASE_HDR AS A INNER JOIN (
+						SELECT A.ORD_NO, COUNT(A.ORD_NO) AS ITM_CNT, MAX(B.SCAN_CODE) AS SCAN_CODE
+							FROM PO_PURCHASE_HDR AS A	
+								INNER JOIN PO_PURCHASE_DTL AS B ON A.ORD_NO = B.ORD_NO
+								WHERE 1 = (CASE WHEN @P_IO_GB = 2 THEN 2 ELSE 1 END)	
+									AND 1 = (CASE WHEN @P_ORD_NO = '' THEN 1 WHEN @P_ORD_NO <> '' AND A.ORD_NO LIKE '%'+@P_ORD_NO+'%' THEN 1 ELSE 0 END ) 
+									AND (@P_S_ORD_DT = '' OR (A.ORD_DT BETWEEN @P_S_ORD_DT AND @P_E_ORD_DT))					 				 
+									AND 1 = (CASE WHEN @P_VEN_CODE = '' THEN 1 WHEN  @P_VEN_CODE <> '' AND @P_VEN_CODE = A.VEN_CODE THEN 1 ELSE 0 END )
+									AND 1 = (CASE WHEN @P_PUR_STAT = '' THEN 1 WHEN @P_PUR_STAT <> '' AND A.PUR_STAT = @P_PUR_STAT THEN 1 ELSE 0 END )
+									--AND (@P_S_DELIVERY_REQ_DT = '' OR (A.DELIVERY_EXP_DT BETWEEN @P_S_DELIVERY_REQ_DT AND @P_E_DELIVERY_REQ_DT))
+									AND 1 = (CASE WHEN @P_SCAN_CODE = '' THEN 1 WHEN @P_SCAN_CODE <> '' AND B.SCAN_CODE = @P_SCAN_CODE THEN 1 ELSE 0 END) 																								
+									AND 1 = (CASE WHEN @P_TRANS_YN = '' THEN 1 WHEN @P_TRANS_YN <> '' AND A.TRANS_YN = @P_TRANS_YN THEN 1 ELSE 0 END)					
+									AND PUR_STAT != '15' -- 주문취소건 제외
+									AND TRANS_YN != 'N'
+						GROUP BY A.ORD_NO
+			) B ON A.ORD_NO = B.ORD_NO	 
+			LEFT OUTER JOIN CD_DELIVERY_PRICE AS C ON A.DELIVERY_PRICE_SEQ = C.SEQ
+			LEFT OUTER JOIN CD_PARTNER_DELIVERY AS D ON A.VEN_CODE = D.VEN_CODE AND A.DELIVERY_CODE = D.DELIVERY_CODE 
+			LEFT OUTER JOIN TBL_COMM_CD_MST AS E ON  E.CD_CL = 'PUR_STAT' AND A.PUR_STAT = E.CD_ID
+			LEFT OUTER JOIN TBL_COMM_CD_MST AS F ON  F.CD_CL = 'TRANS_GB' AND C.TRANS_GB = F.CD_ID
+		)  
+		
+		
+			SELECT ROW_NUMBER() OVER(ORDER BY T1.IO_GB DESC, T1.ORD_NO_PARENT DESC) + @P_PAGE_INDEX AS ROW_NUM
+				, @TOT_CNT AS TOT_CNT
+				, T1.* 
+			FROM (
+				SELECT (CASE WHEN A.IO_GB = 1 THEN '입고'  WHEN A.IO_GB = 2 THEN '출고'  END) AS IO_GB
+					, A.ORD_NO
+					, A.ORD_NO_PARENT
+					, A.ORD_DT
+					, A.IO_GB_REQ_DT
+					, A.ARRIVAL_REQ_DT
+					, A.VEN_CODE
+					, B.VEN_NAME			
+					, C.ITM_NAME + (CASE WHEN A.ITM_CNT > 1 THEN ' 외 ' + CAST(A.ITM_CNT - 1 AS VARCHAR) + '건' ELSE '' END) AS ITM_NAME						
+					, A.DELIVERY_NAME
+					, A.R_ADDR
+					, A.R_ADDR_DTL	
+					, A.IO_STAT			
+					, A.IO_STAT_NM
+					, A.TRANS_GB
+					, A.TRANS_SECTION
+					, A.TRANS_GB_NM
+					, A.REMARKS
+					, ISNULL(F.CAR_NO, '') AS CAR_NO
+					, F.TRANS_COST
+					, F.RENT_COST
+					, F.CAR_GB
+					, DBO.GET_DECRYPT(F.MOBIL_NO) AS MOBIL_NO
+					, G.GROUP_NO
+					, (CASE WHEN G.LAND_GB IS NULL THEN 0 ELSE G.LAND_GB END ) AS LAND_GB
+					, A.SCAN_CODE
+					, (CASE WHEN A.TRANS_YN = 'F' THEN 'FNR배차' ELSE '일반배차' END) AS TRANS_YN
+				FROM LIST AS A
+					--INNER JOIN VIEW_FNR_TRANS_YN AS V_FNR ON A.ORD_NO = V_FNR.ORD_NO	
+					LEFT OUTER JOIN CD_PARTNER_MST AS B ON A.VEN_CODE = B.VEN_CODE
+					LEFT OUTER JOIN CD_PRODUCT_CMN AS C ON A.SCAN_CODE = C.SCAN_CODE			
+					LEFT OUTER JOIN PO_SCALE AS F ON A.ORD_NO = F.ORD_NO	
+					LEFT OUTER JOIN PO_SCALE_GROUP AS G ON A.ORD_NO = G.ORD_NO		
+				WHERE 1 = (CASE WHEN @P_CAR_NO = '' THEN 1 WHEN @P_CAR_NO <> '' AND  F.CAR_NO LIKE '%'+@P_CAR_NO+'%' THEN 1 ELSE 0 END )		
+				  AND 1 = (CASE WHEN @P_ACTIVE_TAB = 'TransManageGrid' THEN 1														--전체
+								WHEN @P_ACTIVE_TAB = 'TransManageGrid2' AND C.SCAN_CODE = '120001' THEN 1							--옥배아
+								WHEN @P_ACTIVE_TAB = 'TransManageGrid3' AND C.SCAN_CODE = '240125' THEN 1							--배아박
+								WHEN @P_ACTIVE_TAB = 'TransManageGrid4' AND C.SCAN_CODE = '130002' THEN 1							--백토
+								WHEN @P_ACTIVE_TAB = 'TransManageGrid5' AND C.WEIGHT_GB = 'QTY'	 THEN 1								--일반제품
+								WHEN @P_ACTIVE_TAB = 'TransManageGrid6' AND C.WEIGHT_GB = 'WT' AND C.SCAN_CODE <> '240125' AND C.SCAN_CODE <> '120001' AND C.SCAN_CODE <> '130002' THEN 1 ELSE 0 END)	--탱크로리(옥배아,배아박,백토 제외)
+				ORDER BY A.IO_GB DESC, A.ORD_NO_PARENT DESC
+				OFFSET @P_PAGE_INDEX ROW			
+				FETCH NEXT @P_TOT_PAGE_ROW ROWS ONLY
+			) AS T1 ORDER BY T1.IO_GB DESC, T1.IO_GB_REQ_DT, T1.ORD_NO_PARENT DESC, LAND_GB ASC
+			
+	EXEC UMAC_CERT_CLOSE_KEY -- CLOSE
+	END TRY
+
+	BEGIN CATCH		
+		--에러 로그 테이블 저장
+		INSERT INTO TBL_ERROR_LOG 
+		SELECT ERROR_PROCEDURE()	-- 프로시저명
+		, ERROR_MESSAGE()			-- 에러메시지
+		, ERROR_LINE()				-- 에러라인
+		, GETDATE()	
+	END CATCH
+	
+END
+
+
+--EXEC PR_TRANS_MANAGE_LIST '','','','20240101','20240402','','','','','','','100','0' 
+
+GO
+

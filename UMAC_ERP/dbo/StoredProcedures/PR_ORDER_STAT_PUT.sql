@@ -1,0 +1,219 @@
+/*
+-- 생성자 :	강세미
+-- 등록일 :	2024.02.23
+-- 수정자 : 강세미
+-- 수정일 : 2024.06.12 강세미: 박스상품 -> 단품상품으로 환산하여 재고차감
+			2024.07.24 강세미: 벌크상품 -> LOT 없이 재고처리
+			2024.08.22 강세미: PLT 재고처리
+			2024.09.11 최수민 : 출고완료시 대시보드 집계처리 (유종별 제품별 출고량, 매출 집계)
+			2024.10.24 강세미 : 출고일자 변경 시 마감일자도 같이 변경
+			2024.11.12 최수민 : 반품일 때 재고는 + 처리되어야 함
+		    2024.11.15 강세미 : 출고일자, 마감일자 - 계근일자로 변경
+			2024.11.26 강세미 : 배차확정취소 상태 추가
+-- 설 명  : 주문등록 상태변경 
+-- 실행문 : EXEC PR_ORDER_STAT_PUT '2240812003','35', 'admin'
+*/
+CREATE PROCEDURE [dbo].[PR_ORDER_STAT_PUT]
+	@P_ORD_NO NVARCHAR(11),			-- 주문번호
+	@P_ORD_STAT NVARCHAR(2),		-- 주문상태
+	@P_EMP_ID NVARCHAR(20) 			-- 아이디
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	 
+	DECLARE @RETURN_CODE		INT = 0								-- 리턴코드(저장완료)
+	DECLARE @RETURN_MESSAGE		NVARCHAR(10) = DBO.GET_ERR_MSG('0')	-- 리턴메시지
+	
+	DECLARE @PICKING_QTY		NUMERIC(15,2) = 0					-- 출고수량
+	DECLARE @MIN				INT = 0								-- WHILE 사용값
+	DECLARE @MAX				INT = 0								-- WHILE 사용값
+	DECLARE @SCAN_CODE			NVARCHAR(14) = ''					-- 스캔코드
+	DECLARE @LOT_NO				NVARCHAR(500) = ''					-- LOT
+	DECLARE @IPSU_QTY			INT									-- 단품 입수
+	DECLARE @ITM_CODE			NVARCHAR(6)							-- 관리코드
+	DECLARE @ITM_FORM			NVARCHAR(2) = ''					-- 상품형태
+	DECLARE @BOX_SCAN_CODE		NVARCHAR(14) = ''					-- 박스스캔코드
+
+	BEGIN TRAN
+	BEGIN TRY 
+		/* 주문확정 */
+		IF @P_ORD_STAT = '10' 
+			BEGIN
+				UPDATE PO_ORDER_HDR
+					SET ORD_STAT = @P_ORD_STAT,
+						ORD_CFM = 'Y',
+						ORD_CFM_DT = CONVERT(NVARCHAR(8), GETDATE(), 112),
+						UDATE = GETDATE(),
+						UEMP_ID = @P_EMP_ID
+					WHERE ORD_NO = @P_ORD_NO;
+			END
+		/* 배차확정취소 -> 주문등록 상태변경 */
+		ELSE IF @P_ORD_STAT = '30'
+			BEGIN
+				UPDATE PO_ORDER_HDR
+					SET ORD_STAT = '10',
+						UDATE = GETDATE(),
+						UEMP_ID = @P_EMP_ID
+					WHERE ORD_NO = @P_ORD_NO;
+				
+				DELETE PO_SCALE WHERE ORD_NO = @P_ORD_NO;
+			END
+		ELSE 
+			BEGIN
+				UPDATE PO_ORDER_HDR
+					SET ORD_STAT = @P_ORD_STAT,
+						UDATE = GETDATE(),
+						UEMP_ID = @P_EMP_ID
+					WHERE ORD_NO = @P_ORD_NO;
+			END
+
+		/* 출고완료 */
+		IF @P_ORD_STAT = '35'
+			BEGIN
+				-- 출고일자, 마감일자 수정
+				UPDATE PO_ORDER_HDR 
+				   SET DELIVERY_DEC_DT = A.SCALE_DT,
+					   CLOSE_DT = A.SCALE_DT
+				  FROM PO_SCALE AS A
+				 WHERE PO_ORDER_HDR.ORD_NO = @P_ORD_NO AND PO_ORDER_HDR.ORD_NO = A.ORD_NO;
+
+				UPDATE PO_SCALE	
+				   SET DELIVERY_DT = SCALE_DT
+				 WHERE ORD_NO = @P_ORD_NO;
+
+				
+
+				/* ##### 제품, 샘플, PLT 재고처리 ##### */
+				--SELECT @MAX = COUNT(1) FROM VIEW_ORDER_DTL_SAMPLE_SUM WHERE ORD_NO = @P_ORD_NO
+				SELECT @MAX = SUM(CNT) 
+				FROM( 
+					SELECT COUNT(1) AS CNT FROM VIEW_ORDER_DTL_SAMPLE_SUM WHERE ORD_NO = @P_ORD_NO
+					UNION ALL
+					SELECT 
+						(CASE WHEN ISNULL(PLT_KPP_QTY11, 0) <> 0 THEN 1 ELSE 0 END) + 
+						(CASE WHEN ISNULL(PLT_KPP_QTY12, 0) <> 0 THEN 1 ELSE 0 END) + 
+						(CASE WHEN ISNULL(PLT_AJ_QTY11, 0) <> 0 THEN 1 ELSE 0 END) + 
+						(CASE WHEN ISNULL(PLT_AJ_QTY12, 0) <> 0 THEN 1 ELSE 0 END) AS CNT 
+					  FROM PO_ORDER_PLT WHERE ORD_NO = @P_ORD_NO
+				) AS PLT_TBL 
+
+				WHILE  @MIN < @MAX
+				BEGIN 				
+					WITH TEMP AS (
+							SELECT
+								A.ORD_NO,
+								A.SCAN_CODE,
+								ISNULL(A.PICKING_QTY,0) AS PICKING_QTY,
+								B.ITM_FORM
+							FROM VIEW_ORDER_DTL_SAMPLE_SUM AS A
+								INNER JOIN CD_PRODUCT_CMN AS B ON A.SCAN_CODE = B.SCAN_CODE
+							UNION ALL
+							SELECT ORD_NO,  
+								   (CASE SCAN_CODE 
+									   WHEN 'PLT_KPP_QTY11' THEN '450001'
+									   WHEN 'PLT_KPP_QTY12' THEN '450003'
+									   WHEN 'PLT_AJ_QTY11' THEN '450004'
+									   WHEN 'PLT_AJ_QTY12' THEN '450002'
+								   END) AS SCAN_CODE,
+								   QTY AS PICKING_QTY,
+								   '' AS ITM_FORM
+							FROM (
+								SELECT ORD_NO, PLT_KPP_QTY11, PLT_KPP_QTY12, PLT_AJ_QTY11, PLT_AJ_QTY12
+								FROM PO_ORDER_PLT
+							) AS SourceTable
+							UNPIVOT (
+								QTY FOR SCAN_CODE IN (PLT_KPP_QTY11, PLT_KPP_QTY12, PLT_AJ_QTY11, PLT_AJ_QTY12)
+							) AS UNPIVOT_TBL
+							WHERE QTY <> 0
+
+					) SELECT @SCAN_CODE = SCAN_CODE,
+							 @PICKING_QTY = -SUM(CAST(PICKING_QTY AS NUMERIC(15,2))),
+							 @ITM_FORM = ITM_FORM
+						FROM TEMP
+						WHERE ORD_NO = @P_ORD_NO 
+						GROUP BY SCAN_CODE, ITM_FORM
+						ORDER BY SCAN_CODE 
+						OFFSET @MIN ROWS FETCH NEXT 1 ROWS ONLY;
+
+					SET @BOX_SCAN_CODE = '' -- BOX스캔코드 초기화
+
+					-- 벌크 OR PLT는 LOT번호 없음
+					IF @ITM_FORM = '3' OR @ITM_FORM = '4' OR @ITM_FORM = ''
+					BEGIN
+						SET @LOT_NO = ''
+					END
+					ELSE
+					BEGIN
+						-- 박스상품: 단품 상품으로 재고 차감
+						IF EXISTS (SELECT A.SCAN_CODE FROM CD_PRODUCT_CMN A
+									INNER JOIN CD_BOX_MST B ON A.ITM_CODE = B.BOX_CODE
+									WHERE A.SCAN_CODE = @SCAN_CODE)
+						BEGIN
+							SELECT @PICKING_QTY = (@PICKING_QTY * B.IPSU_QTY), @ITM_CODE = B.ITM_CODE FROM CD_PRODUCT_CMN A
+									INNER JOIN CD_BOX_MST B ON A.ITM_CODE = B.BOX_CODE
+									WHERE A.SCAN_CODE = @SCAN_CODE
+
+							-- LOT 재고처리를 위한 파라미터 넘기기 위해 저장
+							SET @BOX_SCAN_CODE = @SCAN_CODE 
+							
+							  
+							-- ORDER_LOT는 박스든 단품이든 ORDER_DTL에 있는 스캔코드로 관리하기 때문에 조회됐던 스캔코드로 조회해야함
+							SELECT @LOT_NO = STUFF((SELECT ', ' + LOT_NO FROM PO_ORDER_LOT WHERE ORD_NO= @P_ORD_NO AND SCAN_CODE = @SCAN_CODE   FOR XML PATH('')),1,2,'')
+							FROM PO_ORDER_LOT AS LOT WHERE ORD_NO= @P_ORD_NO AND SCAN_CODE = @SCAN_CODE GROUP BY ORD_NO
+
+							--단품 스캔코드로 변경해주기
+							SELECT @SCAN_CODE = SCAN_CODE FROM CD_PRODUCT_CMN WHERE ITM_CODE = @ITM_CODE
+
+						END
+						ELSE
+						BEGIN			
+							SELECT @LOT_NO = STUFF((SELECT ', ' + LOT_NO FROM PO_ORDER_LOT WHERE ORD_NO= @P_ORD_NO AND SCAN_CODE = @SCAN_CODE   FOR XML PATH('')),1,2,'')
+							FROM PO_ORDER_LOT AS LOT WHERE ORD_NO= @P_ORD_NO AND SCAN_CODE = @SCAN_CODE GROUP BY ORD_NO
+						END
+					END
+
+					/* 2024.11.12 최수민 반품일 때 재고는 + 처리되어야 함 */
+					IF (SELECT ORD_GB FROM PO_ORDER_HDR WHERE ORD_NO = @P_ORD_NO) = 2
+					BEGIN 
+						SET @PICKING_QTY = ABS(@PICKING_QTY);
+					END
+					
+					EXEC PR_IV_PRODUCT_STAT_HDR_PUT @SCAN_CODE, @PICKING_QTY, 'PR_ORDER_STAT_PUT', 0, @LOT_NO, @P_ORD_NO, @BOX_SCAN_CODE, @RETURN_CODE OUT, @RETURN_MESSAGE OUT
+					
+					SET @MIN = @MIN + 1;
+				END
+
+
+				--### 출고완료시 유종별, 제품별 출고량, 매출 집계
+				EXEC PR_AGGR_OIL_ITM_SALE_PUT @P_ORD_NO, @RETURN_CODE OUT, @RETURN_MESSAGE OUT
+			END
+
+		COMMIT
+			
+	END TRY
+	BEGIN CATCH		
+		
+
+		IF @@TRANCOUNT > 0
+		BEGIN 
+			ROLLBACK TRAN
+			
+			--에러 로그 테이블 저장
+			INSERT INTO TBL_ERROR_LOG 
+			SELECT ERROR_PROCEDURE()	-- 프로시저명
+			, ERROR_MESSAGE()			-- 에러메시지
+			, ERROR_LINE()				-- 에러라인
+			, GETDATE()	
+
+			SET @RETURN_CODE = -1 -- 저장실패
+			SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1')
+
+		END 
+
+	END CATCH
+	
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+END
+
+GO
+

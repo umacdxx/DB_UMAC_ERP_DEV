@@ -1,0 +1,183 @@
+/*
+-- 생성자 :	윤현빈
+-- 등록일 :	2024.04.12
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : 생산재고 입력
+-- 실행문 : EXEC PR_PROD_STOCK_REGISTER_PUT '20240412','210001','B','003','20260412-CO-UM-21000','20','TEST',0,''
+-- LOT : SELECT CONCAT(CONVERT(NVARCHAR(8), DATEADD(MONTH, EXPIRY_CNT, DATEADD(DAY, DATEDIFF(DAY, GETDATE(), CAST(@P_PROD_DT AS DATE)) -1, GETDATE())), 112), '-' , LOT_OIL_GB, '-', LOT_PARTNER_GB, '-', ITM_CODE) FROM CD_PRODUCT_CMN WHERE SCAN_CODE = @P_SCAN_CODE
+-- PROD_GB_CD: SELECT BOM_CD from CD_BOM_HDR where BOM_PROD_CD = @P_SCAN_CODE
+*/
+CREATE PROCEDURE [dbo].[PR_PROD_STOCK_REGISTER_PUT]
+	@P_PROD_DT		NVARCHAR(10),	-- 생산일자
+	@P_SCAN_CODE	NVARCHAR(14),	-- 상품코드
+	@P_PROD_GB		NVARCHAR(1),	-- 생산구분
+	@P_PROD_GB_CD	NVARCHAR(3),	-- 생산구분코드
+	@P_LOT_NO		NVARCHAR(30),	-- LOT
+	@P_EXPIRATION_DT NVARCHAR(8),	-- 소비기한
+	--@P_BOX_QTY		NUMERIC(15,2),	-- 박스수량
+	@P_PROD_QTY		NUMERIC(15,2),	-- 생산수량
+	--@P_BOX_APP_QTY	NUMERIC(15,2),	-- 박스확정수량
+	@P_PROD_APP_QTY	NUMERIC(15,2),	-- 생산확정수량
+	@P_EMP_ID		NVARCHAR(20),	-- 등록자
+	@P_CONFIRM_YN NVARCHAR(2)		-- 확정여부 (Y, N )
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	DECLARE @RETURN_CODE 	INT 			= 0		-- 리턴코드
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) 	= '' 	-- 리턴메시지
+	DECLARE @MODIFY_YN 		NVARCHAR(1)		= ''	-- 수정여부(수정:Y, 신규:N)
+	DECLARE @PRE_PROD_QTY	INT				= 0 	-- 수정전 수량 (당일 수정 시 재고처리 위하여 필요)	
+	DECLARE @PRE_PROD_GB_CD	VARCHAR(3)		= '' 	-- 수정전 BOM/SET CODE
+	
+	DECLARE @PRE_PROD_APP_QTY	INT			= 0 	-- 수정전 확정 수량 (당일 수정 시 재고처리 위하여 필요)	
+
+	BEGIN TRAN
+	BEGIN TRY
+		
+		IF EXISTS (
+			SELECT 1
+				FROM CD_LOT_MST
+			   WHERE 1=1
+			     AND PROD_DT	= @P_PROD_DT
+				 AND SCAN_CODE  = @P_SCAN_CODE
+				 AND LOT_NO = @P_LOT_NO
+				 AND CFM_FLAG = 'Y'
+		)
+		BEGIN
+			SET @RETURN_CODE = -44 -- 생산 저장 실패(이미 확정된 행이 있음)
+			SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-44')
+		END
+
+		ELSE
+		BEGIN
+			/*
+			 * 1. 생산테이블 처리
+			 */
+			IF EXISTS(
+				SELECT 1
+					FROM CD_LOT_MST
+				   WHERE 1=1
+					 AND PROD_DT	= @P_PROD_DT
+					 AND SCAN_CODE  = @P_SCAN_CODE
+					 AND LOT_NO = @P_LOT_NO
+			)
+			/*
+			 * 당일 수정
+			 */
+			BEGIN 
+				SET @MODIFY_YN = 'Y'
+			
+				SELECT @PRE_PROD_QTY = PROD_QTY
+					 , @PRE_PROD_APP_QTY = PROD_APP_QTY
+					 , @PRE_PROD_GB_CD = PROD_GB_CD
+					FROM CD_LOT_MST
+				   WHERE 1=1
+					 AND PROD_DT	= @P_PROD_DT
+					 AND SCAN_CODE  = @P_SCAN_CODE
+					 AND LOT_NO = @P_LOT_NO
+				;
+			
+				UPDATE CD_LOT_MST
+					SET LOT_NO 		= @P_LOT_NO
+					  , EXPIRATION_DT = @P_EXPIRATION_DT
+					  , PROD_GB_CD 	= @P_PROD_GB_CD
+					  , PROD_QTY 	= @P_PROD_QTY
+					  , PROD_APP_QTY = @P_PROD_APP_QTY
+					  , UDATE 		= GETDATE()
+					  , UEMP_ID 	= @P_EMP_ID
+				WHERE 1=1
+				  AND PROD_DT	= @P_PROD_DT
+				  AND SCAN_CODE	= @P_SCAN_CODE
+				  AND LOT_NO = @P_LOT_NO
+				;
+			END
+			/*
+			* 신규
+			*/
+			ELSE
+			BEGIN
+				SET @MODIFY_YN = 'N'
+			
+				INSERT INTO CD_LOT_MST 
+				(
+					PROD_DT
+				  , SCAN_CODE
+				  , PROD_GB
+				  , LOT_NO
+				  , EXPIRATION_DT
+				  , PROD_GB_CD
+				  , PROD_QTY
+				  , PROD_APP_QTY
+				  , IDATE
+				  , IEMP_ID
+				)
+				VALUES
+				(
+					@P_PROD_DT
+	 			  , @P_SCAN_CODE
+	 			  , @P_PROD_GB
+	 			  , @P_LOT_NO
+				  , @P_EXPIRATION_DT
+	 			  , @P_PROD_GB_CD
+	 			  , @P_PROD_QTY
+				  , @P_PROD_APP_QTY
+	 			  , GETDATE()
+	 			  , @P_EMP_ID
+				)
+			END
+
+			/*
+			* 2. 현 재고처리 프로시저
+			*/
+			EXEC PR_IV_PRODUCT_STAT_PUT @MODIFY_YN, @P_SCAN_CODE, @P_LOT_NO, @P_PROD_GB, @P_PROD_GB_CD, '', '', @PRE_PROD_QTY, @PRE_PROD_APP_QTY, @PRE_PROD_GB_CD, @P_PROD_QTY, @P_PROD_APP_QTY,'PR_PROD_STOCK_REGISTER_PUT', @P_PROD_DT, @P_EMP_ID, @P_CONFIRM_YN, @RETURN_CODE OUTPUT, @RETURN_MESSAGE OUTPUT;
+
+			IF @P_CONFIRM_YN = 'Y'
+			BEGIN
+				UPDATE CD_LOT_MST
+					SET CFM_FLAG = 'Y'
+					  , CFM_EMP_ID = @P_EMP_ID
+					  , CFM_DT = CONVERT(NVARCHAR(8), GETDATE(), 112)
+				   WHERE PROD_DT	= @P_PROD_DT
+					 AND SCAN_CODE	= @P_SCAN_CODE
+					 AND LOT_NO = @P_LOT_NO
+				;
+			
+				SET @RETURN_CODE = 91 -- 확정완료
+				SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('91')
+			END
+			ELSE
+			BEGIN
+				SET @RETURN_CODE = 0 -- 저장완료
+				SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('0')
+			END
+		END
+		
+		COMMIT;
+	END TRY
+	BEGIN CATCH		
+	
+		IF @@TRANCOUNT > 0
+		BEGIN
+			
+			ROLLBACK TRAN
+
+			--에러 로그 테이블 저장
+			INSERT INTO TBL_ERROR_LOG 
+			SELECT ERROR_PROCEDURE()	-- 프로시저명
+			, ERROR_MESSAGE()			-- 에러메시지
+			, ERROR_LINE()				-- 에러라인
+			, GETDATE();
+		
+			SET @RETURN_CODE = -1; -- 저장 실패
+			SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1');
+	
+		END
+			
+	END CATCH
+
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+END
+
+GO
+

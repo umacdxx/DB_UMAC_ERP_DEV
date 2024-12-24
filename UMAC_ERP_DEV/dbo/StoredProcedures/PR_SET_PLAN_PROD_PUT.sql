@@ -1,0 +1,238 @@
+/*
+-- 생성자 :	윤현빈
+-- 등록일 :	2024.08.09
+-- 수정자 : -
+-- 수정일 : - 
+-- 설 명  : SET 생산 계획 HRD 등록
+-- 실행문 : EXEC PR_SET_PLAN_PROD_PUT '','',''
+*/
+CREATE PROCEDURE [dbo].[PR_SET_PLAN_PROD_PUT]
+( 
+	@P_JSONDT			VARCHAR(8000) = '',
+	@P_SET_PLAN_ID		NVARCHAR(11) = '',
+	@P_EMP_ID			NVARCHAR(20)				-- 아이디
+)
+AS
+BEGIN
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	DECLARE @V_SET_STATUS	NVARCHAR(2);			-- 생산계획 상태값
+	DECLARE @RETURN_CODE 	INT 			= 0		-- 리턴코드
+	DECLARE @RETURN_MESSAGE NVARCHAR(10) 	= '' 	-- 리턴메시지
+	
+
+	BEGIN TRAN
+	BEGIN TRY
+		SELECT @V_SET_STATUS = SET_STATUS FROM PD_SET_PLAN_MST WHERE SET_PLAN_ID = @P_SET_PLAN_ID;
+
+		DECLARE @TMP_ITEM TABLE (
+			SCAN_CODE NVARCHAR(14),
+			PLAN_QTY INT,
+			SET_EXPIRY_DATE NVARCHAR(8),
+			MODE NVARCHAR(1)
+		)
+		
+		INSERT INTO @TMP_ITEM
+		SELECT SCAN_CODE, PLAN_QTY, SET_EXPIRY_DATE, MODE
+			FROM 
+				OPENJSON ( @P_JSONDT )   
+					WITH (    
+						SCAN_CODE NVARCHAR(14) '$.SCAN_CODE',
+						PLAN_QTY INT '$.PLAN_QTY',
+						SET_EXPIRY_DATE NVARCHAR(8) '$.SET_EXPIRY_DATE',
+						MODE NVARCHAR(1) '$.MODE'
+					)
+				
+		DECLARE CURSOR_SET_PLAN CURSOR FOR
+
+			SELECT A.SCAN_CODE, A.PLAN_QTY, A.SET_EXPIRY_DATE, A.MODE 
+				FROM @TMP_ITEM A
+				INNER JOIN CD_PRODUCT_CMN AS B ON A.SCAN_CODE = B.SCAN_CODE
+			
+		OPEN CURSOR_SET_PLAN
+
+		DECLARE @P_SCAN_CODE NVARCHAR(14),
+				@P_PLAN_QTY INT,
+				@P_SET_EXPIRY_DATE NVARCHAR(8),
+				@P_MODE NVARCHAR(1)
+
+		FETCH NEXT FROM CURSOR_SET_PLAN INTO @P_SCAN_CODE, @P_PLAN_QTY, @P_SET_EXPIRY_DATE, @P_MODE
+		
+			WHILE(@@FETCH_STATUS=0)
+			BEGIN
+				IF @V_SET_STATUS != '3'	-- 완료상태가 아닌것들만 처리
+				BEGIN
+					IF @P_MODE = 'D'
+					BEGIN
+						MERGE INTO PD_SET_PLAN_COMP AS A
+							USING (
+								SELECT A.SET_PLAN_ID 
+									 , A.SCAN_CODE
+									 , B.SET_CD
+									 , B.SET_COMP_CD
+									 , @P_PLAN_QTY * B.COMP_QTY AS PLAN_QTY
+									FROM PD_SET_PLAN_PROD AS A
+									INNER JOIN (
+										SELECT A.SET_CD
+											 , A.SET_PROD_CD AS SCAN_CODE
+											 , B.SET_COMP_CD
+											 , B.COMP_QTY
+											FROM CD_SET_HDR AS A
+											INNER JOIN CD_SET_DTL AS B ON A.SET_CD = B.SET_CD
+									) AS B ON A.SCAN_CODE = B.SCAN_CODE
+								   WHERE A.SET_PLAN_ID = @P_SET_PLAN_ID
+								     AND A.SCAN_CODE = @P_SCAN_CODE
+							) AS B 
+							ON (A.SET_PLAN_ID = @P_SET_PLAN_ID AND A.SCAN_CODE = B.SCAN_CODE AND A.SET_CD = B.SET_CD AND A.SET_COMP_CD = B.SET_COMP_CD)
+						WHEN MATCHED THEN
+							UPDATE 
+								SET PLAN_QTY = A.PLAN_QTY - B.PLAN_QTY
+								  , UDATE = GETDATE()
+								  , UEMP_ID = @P_EMP_ID
+						;
+						
+						DELETE FROM PD_SET_PLAN_PROD WHERE SET_PLAN_ID = @P_SET_PLAN_ID AND SCAN_CODE = @P_SCAN_CODE;
+					END
+
+					ELSE
+					BEGIN
+						MERGE INTO PD_SET_PLAN_PROD AS A
+							USING (SELECT 1 AS dual) AS B ON (A.SET_PLAN_ID = @P_SET_PLAN_ID AND A.SCAN_CODE = @P_SCAN_CODE)
+						WHEN MATCHED THEN 
+							UPDATE 
+								SET A.PLAN_QTY = @P_PLAN_QTY
+								  , A.SET_EXPIRY_DATE = @P_SET_EXPIRY_DATE
+								  , A.UDATE = GETDATE()
+								  , A.UEMP_ID = @P_EMP_ID
+
+						WHEN NOT MATCHED THEN
+							INSERT 
+							(
+								SET_PLAN_ID
+							  , SCAN_CODE
+							  , PLAN_QTY
+							  , SET_EXPIRY_DATE
+							  , IDATE
+							  , IEMP_ID
+							  , UDATE
+							  , UEMP_ID
+							)
+							VALUES
+							(
+								@P_SET_PLAN_ID
+							  , @P_SCAN_CODE
+							  , @P_PLAN_QTY
+							  , @P_SET_EXPIRY_DATE
+							  , GETDATE()
+							  , @P_EMP_ID
+							  , NULL
+							  , NULL
+							)
+						;
+						
+						MERGE INTO PD_SET_PLAN_COMP AS A
+							USING (
+								SELECT A.SET_PLAN_ID 
+									 , A.SCAN_CODE
+									 , B.SET_CD
+									 , B.SET_COMP_CD
+									 , A.PLAN_QTY * B.COMP_QTY AS PLAN_QTY
+									FROM PD_SET_PLAN_PROD AS A
+									INNER JOIN (
+										SELECT A.SET_CD
+											 , A.SET_PROD_CD AS SCAN_CODE
+											 , B.SET_COMP_CD
+											 , B.COMP_QTY
+											FROM CD_SET_HDR AS A
+											INNER JOIN CD_SET_DTL AS B ON A.SET_CD = B.SET_CD
+									) AS B ON A.SCAN_CODE = B.SCAN_CODE
+								   WHERE A.SET_PLAN_ID = @P_SET_PLAN_ID
+								     AND A.SCAN_CODE = @P_SCAN_CODE
+							) AS B 
+							ON (A.SET_PLAN_ID = @P_SET_PLAN_ID AND A.SCAN_CODE = B.SCAN_CODE AND A.SET_CD = B.SET_CD AND A.SET_COMP_CD = B.SET_COMP_CD)
+						WHEN MATCHED THEN
+							UPDATE 
+								SET PLAN_QTY = B.PLAN_QTY
+								  , UDATE = GETDATE()
+								  , UEMP_ID = @P_EMP_ID
+						WHEN NOT MATCHED THEN
+							INSERT
+							(
+								SET_PLAN_ID
+							  , SCAN_CODE
+							  , SET_CD
+							  , SET_COMP_CD
+							  , PLAN_QTY
+							  , IDATE
+							  , IEMP_ID
+							  , UDATE
+							  , UEMP_ID
+							)
+							VALUES
+							(
+								@P_SET_PLAN_ID
+							  , B.SCAN_CODE
+							  , B.SET_CD
+							  , B.SET_COMP_CD
+							  , B.PLAN_QTY
+							  , GETDATE()
+							  , @P_EMP_ID
+							  , NULL
+							  , NULL
+							)
+						;
+
+					END
+				END
+
+				FETCH NEXT FROM CURSOR_SET_PLAN INTO @P_SCAN_CODE, @P_PLAN_QTY, @P_SET_EXPIRY_DATE, @P_MODE
+
+			END
+
+		CLOSE CURSOR_SET_PLAN
+		DEALLOCATE CURSOR_SET_PLAN
+
+		IF EXISTS (
+			SELECT 1
+				FROM PD_SET_PLAN_PROD
+			   WHERE SET_PLAN_ID = @P_SET_PLAN_ID
+		) 
+		BEGIN
+			UPDATE PD_SET_PLAN_MST
+				SET SET_STATUS = '1'
+				  , UDATE = GETDATE()
+				  , UEMP_ID = @P_EMP_ID
+			   WHERE SET_PLAN_ID = @P_SET_PLAN_ID
+				 AND SET_STATUS = '0'
+			;
+		END
+		
+		SET @RETURN_CODE = 0; -- 저장완료
+		SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('0');
+		COMMIT;
+	END TRY
+	
+	BEGIN CATCH		
+		IF @@TRANCOUNT > 0
+		BEGIN
+			ROLLBACK TRAN
+
+			--에러 로그 테이블 저장
+			INSERT INTO TBL_ERROR_LOG 
+			SELECT ERROR_PROCEDURE()	-- 프로시저명
+			, ERROR_MESSAGE()			-- 에러메시지
+			, ERROR_LINE()				-- 에러라인
+			, GETDATE();
+		
+			SET @RETURN_CODE = -1; -- 저장 실패
+			SET @RETURN_MESSAGE = DBO.GET_ERR_MSG('-1');
+		END
+			
+	END CATCH
+
+	SELECT @RETURN_CODE AS RETURN_CODE, @RETURN_MESSAGE AS RETURN_MESSAGE
+
+END
+
+GO
+
